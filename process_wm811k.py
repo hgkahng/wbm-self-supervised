@@ -1,8 +1,10 @@
 # -*- coding: utf-8 -*-
 
 import os
+import glob
 import time
 import tqdm
+import argparse
 import numpy as np
 import pandas as pd
 import torch
@@ -48,7 +50,7 @@ class WM811kProcessor(object):
                 pbar.set_description_str(f" {root} - {i:06} ")
                 pbar.update(1)
 
-    def write_unlabeled_images(self, root: str = './data/images/unlabeled/', train_size: float = 0.8, valid_size: float = 0.1):
+    def write_unlabeled_images(self, root: str = './data/wm811k/unlabeled/', train_size: float = 0.8, valid_size: float = 0.1):
         """Write wafer images without labels."""
         test_size = 1 - train_size - valid_size
 
@@ -71,7 +73,7 @@ class WM811kProcessor(object):
         self.write_images(os.path.join(root, 'valid'), valid_indices)
         self.write_images(os.path.join(root, 'test'), test_indices)
 
-    def write_labeled_images(self, root: str = './data/images/labeled/', train_size: float = 0.8, valid_size: float = 0.1):
+    def write_labeled_images(self, root: str = './data/wm811k/labeled/', train_size: float = 0.8, valid_size: float = 0.1):
         """Write wafer images with labels."""
         test_size = 1 - train_size - valid_size
 
@@ -124,6 +126,33 @@ class WM811kProcessor(object):
 
 if __name__ == '__main__':
 
-    processor = WM811kProcessor(wm811k_file='./data/WM-811k/LSWMD.pkl')
-    processor.write_labeled_images(root='./data/images/labeled/', train_size=0.8, valid_size=0.1)
-    processor.write_unlabeled_images(root='./data/images/unlabeled/', train_size=0.8, valid_size=0.1)
+    def parse_args():
+        """Parse command line arguments."""
+
+        parser = argparse.ArgumentParser("Process WM-811k data to individual image files.", add_help=True)
+        parser.add_argument('--labeled_root', type=str, default='./data/wm811k/labeled')
+        parser.add_argument('--unlabeled_root', type=str, default='./data/wm811k/unlabeled')
+        parser.add_argument('--labeled_train_size', type=float, default=0.8)
+        parser.add_argument('--labeled_valid_size', type=float, default=0.1)
+        parser.add_argument('--unlabeled_train_size', type=float, default=0.8)
+        parser.add_argument('--unlabeled_valid_size', type=float, default=0.1)
+
+        return parser.parse_args()
+
+    def check_files_exist_in_directory(directory: str, file_ext: str = 'png', recursive: bool = True):
+        """Check existence of files of specific types are under a directory"""
+        files = glob.glob(os.path.join(directory, f"**/*.{file_ext}"), recursive=recursive)
+        return len(files) > 0  # True if files exist, else False.
+
+    args = parse_args()
+    processor = WM811kProcessor(wm811k_file='./data/wm811k/LSWMD.pkl')
+
+    if not check_files_exist_in_directory(args.labeled_root):
+        processor.write_labeled_images(root='./data/wm811k/labeled/', train_size=0.8, valid_size=0.1)
+    else:
+        print(f"Labeled images exist in `{args.labeled_root}`. Skipping...")
+
+    if not check_files_exist_in_directory(args.unlabeled_root):
+        processor.write_unlabeled_images(root='./data/wm811k/unlabeled/', train_size=0.8, valid_size=0.1)
+    else:
+        print(f"Unlabeled images exist in `{args.unlabeled_root}`. Skipping...")
