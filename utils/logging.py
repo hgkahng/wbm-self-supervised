@@ -6,6 +6,20 @@ import logging
 from colorama import Fore
 
 
+def make_epoch_description(history: dict, current: int, total: int, best: int, exclude: list = []):
+    """Create description string for logging progress."""
+    pfmt = f">{len(str(total))}d"
+    desc = f" Epoch: [{current:{pfmt}}/{total:{pfmt}}] ({best:{pfmt}}) |"
+    for metric_name, metric_dict  in history.items():
+        if not isinstance(metric_dict, dict):
+            raise TypeError("`history` must be a nested dictionary.")
+        if metric_name in exclude:
+            continue
+        for k, v in metric_dict.items():
+            desc += f" {k}_{metric_name}: {v:.4f} |"
+    return desc
+
+
 def get_tqdm_config(total, leave=True, color='white'):
     fore_colors = {
         'red': Fore.LIGHTRED_EX,
@@ -25,6 +39,7 @@ def get_tqdm_config(total, leave=True, color='white'):
             "{l_bar}%s{bar}%s| [{elapsed}<{remaining}, {rate_fmt}{postfix}]" % (fore_colors[color], Fore.RESET),
         'leave': leave
     }
+
 
 def get_logger(stream=False, logfile=None, level=logging.INFO):
     """

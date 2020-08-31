@@ -15,8 +15,14 @@ def initialize_weights(model: nn.Module, activation='relu'):
 
         elif isinstance(m, nn.BatchNorm2d):
             nn.init.constant_(m.weight, 1)
-            nn.init.constant_(m.bias, 1)
+            try:
+                nn.init.constant_(m.bias, 1)
+            except AttributeError:
+                pass
 
         elif isinstance(m, nn.Linear):
             nn.init.normal_(m.weight, 0, 0.02)
-            nn.init.constant_(m.bias, 0)
+            try:
+                nn.init.constant_(m.bias, 0)
+            except AttributeError:
+                pass

@@ -65,22 +65,28 @@ def transpose_conv_output_shape(hw, kernel_size=1, stride=1, pad=0, dilation=1):
     else:
         assert len(pad) == 2
 
-    h = (hw[0] - 1) * stride[0] - (2 * pad[0]) + (dilation * kernel_size[0]) + pad[0]
-    w = (hw[1] - 1) * stride[1] - (2 * pad[1]) + (dilation * kernel_size[1]) + pad[1]
+    h = (hw[0] - 1) * stride[0] - (2 * pad[0]) + (dilation * kernel_size[0])
+    w = (hw[1] - 1) * stride[1] - (2 * pad[1]) + (dilation * kernel_size[1])
 
     return h, w
 
 
 if __name__ == '__main__':
 
-    HEIGHT, WIDTH = (40, 40)
-    KERNEL_SIZE = 3
-    STRIDE = 1
-    PAD = 1
+    HEIGHT, WIDTH = (96, 96)
+    KERNEL_SIZE = 7
+    STRIDE = 2
+    PAD = 3
     DILATION = 1
 
+    print("Kernel size:", KERNEL_SIZE)
+    print("Stride:", STRIDE)
+    print("Padding:", PAD)
+    print("Dilation:", DILATION)
     print("2D convolution operation shape check:")
     output_shape = conv_output_shape(HEIGHT, KERNEL_SIZE, STRIDE, PAD, DILATION)
     print(f"INPUT SHAPE: ({HEIGHT}, {WIDTH}) -> OUTPUT SHAPE: ({output_shape[0]}, {output_shape[1]})")
 
-    # TODO: Add test for transpose operation
+    print("2D transpose convolution operation shape check:")
+    output_shape = transpose_conv_output_shape(HEIGHT, KERNEL_SIZE, STRIDE, PAD, DILATION)
+    print(f"INPUT SHAPE: ({HEIGHT}, {WIDTH}) -> OUTPUT SHAPE: ({output_shape[0]}, {output_shape[1]})")

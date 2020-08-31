@@ -4,6 +4,47 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from pytorch_lightning.metrics import MulticlassROC, MulticlassPrecisionRecall
+from pytorch_lightning.metrics.functional import auc, precision, recall
+
+
+class MultiAUPRC(nn.Module):
+    def __init__(self, num_classes: int):
+        super(MultiAUPRC, self).__init__()
+        self.num_classes = num_classes
+        self.multi_prc = MulticlassPrecisionRecall(num_classes=num_classes)
+
+    def forward(self, logits: torch.Tensor, labels: torch.Tensor):
+        multi_prcs = self.multi_prc(
+            pred=logits.softmax(dim=1),
+            target=labels,
+            sample_weight=None
+        )
+        avg_auprc = 0.
+        for precision, recall, _ in multi_prcs:
+            avg_auprc += auc(x=precision, y=recall, reorder=True)
+
+        return torch.Tensor([avg_auprc / self.num_classes])
+
+
+class MultiAUROC(nn.Module):
+    def __init__(self, num_classes: int):
+        super(MultiAUROC, self).__init__()
+        self.num_classes = num_classes
+        self.multi_roc = MulticlassROC(num_classes=num_classes)
+
+    def forward(self, logits: torch.Tensor, labels: torch.Tensor):
+        multi_rocs = self.multi_roc(
+            pred=logits.softmax(dim=1),
+            target=labels,
+            sample_weight=None
+        )
+        avg_auroc = 0.
+        for fpr, tpr, _ in multi_rocs:
+            avg_auroc += auc(x=fpr, y=tpr, reorder=True)
+
+        return torch.Tensor([avg_auroc / self.num_classes])
+
 
 class MultiAccuracy(nn.Module):
     def __init__(self, num_classes: int):
@@ -43,6 +84,52 @@ class TopKAccuracy(nn.Module):
             correct = correct.sum(dim=1).bool().float()                         # (B, ) & {0, 1}
 
             return torch.mean(correct)
+
+
+class MultiPrecision(nn.Module):
+    def __init__(self, num_classes: int, average='macro'):
+        super(MultiPrecision, self).__init__()
+        self.num_classes = num_classes
+        assert average in ['macro', 'micro', 'weighted']
+        self.average = average
+
+    def forward(self, logits: torch.Tensor, labels: torch.Tensor):
+        assert logits.ndim == 2
+        assert labels.ndim == 1
+
+        with torch.no_grad():
+            if self.average == 'macro':
+                return precision(
+                    pred=nn.functional.softmax(logits, dim=1),
+                    target=labels,
+                    num_classes=self.num_classes,
+                    reduction='elementwise_mean'
+                )
+            else:
+                raise NotImplementedError
+
+
+class MultiRecall(nn.Module):
+    def __init__(self, num_classes: int, average='macro'):
+        super(MultiRecall, self).__init__()
+        self.num_classes = num_classes
+        assert average in ['macro', 'micro', 'weighted']
+        self.average = average
+    
+    def forward(self, logits: torch.Tensor, labels: torch.Tensor):
+        assert logits.ndim == 2
+        assert labels.ndim == 1
+
+        with torch.no_grad():
+            if self.average == 'macro':
+                return recall(
+                    pred=nn.functional.softmax(logits, dim=1),
+                    target=labels,
+                    num_classes=self.num_classes,
+                    reduction='elementwise_mean',
+                )
+            else:
+                raise NotImplementedError
 
 
 class MultiF1Score(nn.Module):
