@@ -1,12 +1,15 @@
 # -*- coding: utf-8 -*-
 
+import math
 import functools
 import collections
 
 import torch
 import torch.nn as nn
 
-from models.base import HeadBase, FlattenHeadBase, PoolingHeadBase
+from entmax import sparsemax
+
+from models.base import FlattenHeadBase, PoolingHeadBase
 from layers.core import Flatten
 from utils.initialization import initialize_weights
 
@@ -109,6 +112,9 @@ class GAPProjector(GAPClassifier):
         """
         super(GAPProjector, self).__init__(in_channels, num_features, dropout=0.)
 
+    @property
+    def num_features(self):
+        return self.num_classes
 
 class NonlinearProjector(PoolingHeadBase):
     def __init__(self, in_channels: int, num_features: int):
@@ -150,6 +156,80 @@ class NonlinearProjector(PoolingHeadBase):
         return sum(p.numel() for p in self.layers.parameters() if p.requires_grad)
 
 
+class AttentionProjector(PoolingHeadBase):
+    def __init__(self, in_channels: int, num_features: int, dropout: float = 0.1, temperature: float = None):
+        super(AttentionProjector, self).__init__(in_channels, num_features)
+
+        self.in_channels = in_channels
+        self.num_features = num_features
+        self.temperature = temperature if isinstance(temperature, float) else math.sqrt(num_features)
+
+        self.nonlinear = nn.Sequential(
+            collections.OrderedDict(
+                [
+                    ('gap', nn.AdaptiveAvgPool2d(1)),
+                    ('flatten', Flatten()),
+                    ('linear', nn.Linear(in_channels, num_features)),
+                    ('relu', nn.ReLU(inplace=True))
+                ]
+            )
+        )
+
+        self.q_linear = nn.Linear(num_features, num_features, bias=False)
+        self.k_linear = nn.Linear(num_features, num_features, bias=False)
+        self.v_linear = nn.Linear(num_features, num_features, bias=True)
+
+        self.softmax = nn.Softmax(dim=1)
+        self.dropout = nn.Dropout(dropout) if isinstance(dropout, float) else None
+
+        self.initialize_weights()
+
+    def forward(self, x: torch.Tensor):
+
+        if x.ndim != 4:
+            raise ValueError(f"Expecting 4d input of shape (num_views x B, C, H, W).")
+
+        h = self.nonlinear(x)          # (NxB,   F)
+
+        Q = self.q_linear(h)           # (NxB,   F)
+        K = self.k_linear(h)           # (NxB,   F)
+        V = self.v_linear(h)           # (NxB,   F)
+
+        energy = torch.matmul(Q, K.T)  # (NxB, NxB)
+        energy.div_(self.temperature)
+        attention = self.softmax(energy)
+
+        if self.dropout is not None:
+            attention = self.dropout(attention)
+
+        out = torch.matmul(attention, V)
+        out = nn.functional.relu(out)
+
+        return out, attention         # (NxB, F), (NxB, NxB)
+
+    @property
+    def num_parameters(self):
+        n = 0
+        for layer in [self.q_linear, self.k_linear, self.v_linear]:
+            for p in layer.parameters():
+                if p.requires_grad:
+                    n += p.numel()
+        return n
+
+    def initialize_weights(self):
+        for _, m in self.named_modules():
+            if isinstance(m, nn.Linear):
+                nn.init.kaiming_normal_(m.weight, nonlinearity='relu')
+                if m.bias is not None:
+                    nn.init.constant_(m.bias, 1)
+            elif isinstance(m, nn.BatchNorm1d):
+                nn.init.constant_(m.weight, 1)
+                if m.bias is not None:
+                    nn.init.constant_(m.bias, 1)
+            else:
+                pass
+
+
 class PatchGAPClassifier(PoolingHeadBase):
     def __init__(self, num_patches: int, in_channels: int, num_classes: int, dropout: float = 0.0):
 
@@ -181,7 +261,7 @@ class PatchGAPClassifier(PoolingHeadBase):
                 [
                     ('gap', nn.AdaptiveAvgPool2d(1)),
                     ('flatten', Flatten()),
-                    ('dropout1', nn.DRopout(p=dropout)),
+                    ('dropout1', nn.Dropout(p=dropout)),
                     ('linear1', nn.Linear(num_patches * in_channels, in_channels)),
                     ('relu1', nn.ReLU(inplace=True)),
                     ('dropout2', nn.Dropout(p=dropout)),

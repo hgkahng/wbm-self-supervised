@@ -58,11 +58,12 @@ class ClassificationConfig(ConfigBase):
     def checkpoint_dir(self):
         ckpt = os.path.join(
             self.checkpoint_root,
-            self.task,
+            self.data,  # 'wm811k', 'cifar10', 'stl10', 'imagenet', ...
+            self.task,  # 'scratch', 'denoising', 'pirl', 'simclr', ...
             self.model_name,
-            f'DI_{self.data_index:02}',   # DI_00   | DI_01,   ...
-            f'LP_{self.labeled:.3f}',     # LP_0.10 | LP_0.20, ...
-            f'FT_{self.finetune_type}',   # FT_0 | FT_1 | FT_2 | FT_3
+            self.augmentation,
+            f'SEED_{self.seed:03}',
+            f'LABEL_{self.label_proportion:.3f}',
             self.hash
             )
         os.makedirs(ckpt, exist_ok=True)
@@ -77,13 +78,13 @@ class ClassificationConfig(ConfigBase):
         suffix = '_scratch' if self.pretext is None else f'_{self.pretext}'
         return 'classification' + suffix
 
-    def find_pretrained_model(self, root: str = None, name: str = None, model_type: str = 'best'):
+    def find_pretrained_model(self, root: str = None, name: str = None):
         """Find pretrained model under `root` directory. Duplicates should be manually avoided."""
 
-        root = f"./checkpoints/{self.pretext}/" if root is None else root
-        name = f"{model_type}_model.pt" if name is None else name
+        root = f"./checkpoints/{self.data}/{self.pretext}/" if root is None else root
+        name = f"last_model.pt" if name is None else name  # FIXME: best vs. last
 
-        config_files = glob.glob(os.path.join(root, "**/*/configs.json"), recursive=True)
+        config_files = glob.glob(os.path.join(root, "**/configs.json"), recursive=True)
 
         if self.pretext == 'denoising':
             candidates = self._find_denoising_models(config_files, name)
@@ -99,6 +100,10 @@ class ClassificationConfig(ConfigBase):
             candidates = self._find_pirl_models(config_files, name)
         elif self.pretext == 'simclr':
             candidates = self._find_simclr_models(config_files, name)
+        elif self.pretext == 'semiclr':
+            candidates =self._find_semiclr_models(config_files, name)
+        elif self.pretext == 'attnclr':
+            candidates = self._find_attnclr_models(config_files, name)
         else:
             raise NotImplementedError
 
@@ -117,7 +122,7 @@ class ClassificationConfig(ConfigBase):
             conds = [
                 cfg.get('backbone_type') == self.backbone_type,
                 cfg.get('backbone_config') == self.backbone_config,
-                cfg.get('in_channels') == self.in_channels,
+                cfg.get('augmentation') == self.augmentation,
                 cfg.get('noise') == self.noise,
             ]
             if all(conds):
@@ -138,7 +143,7 @@ class ClassificationConfig(ConfigBase):
             conds =[
                 cfg.get('backbone_type') == self.backbone_type,
                 cfg.get('backbone_config') == self.backbone_config,
-                cfg.get('in_channels') == self.in_channels,
+                # cfg.get('in_channels') == self.in_channels,
                 cfg.get('num_patches') == self.num_patches,
                 cfg.get('num_permutations') == self.num_permutations,
             ]
@@ -157,7 +162,7 @@ class ClassificationConfig(ConfigBase):
             conds = [
                 cfg.get('backbone_type') == self.backbone_type,
                 cfg.get('backbone_config') == self.backbone_config,
-                cfg.get('in_channels') == self.in_channels,
+                # cfg.get('in_channels') == self.in_channels,
             ]
             if all(conds):
                 pt_file = os.path.join(os.path.dirname(config_file), name)
@@ -174,7 +179,7 @@ class ClassificationConfig(ConfigBase):
             conds =[
                 cfg.get('backbone_type') == self.backbone_type,
                 cfg.get('backbone_config') == self.backbone_config,
-                cfg.get('in_channels') == self.in_channels,
+                # cfg.get('in_channels') == self.in_channels,
                 cfg.get('gan_type') == self.gan_type,
                 cfg.get('gan_config') == self.gan_config,
             ]
@@ -193,12 +198,10 @@ class ClassificationConfig(ConfigBase):
             conds = [
                 cfg.get('backbone_type') == self.backbone_type,
                 cfg.get('backbone_config') == self.backbone_config,
-                cfg.get('in_channels') == self.in_channels,
-                cfg.get('num_negatives') == self.num_negatives,
                 cfg.get('projector_type') == self.projector_type,
                 cfg.get('projector_size') == self.projector_size,
-                cfg.get('noise') == self.noise,
-                cfg.get('rotate') == self.rotate,
+                cfg.get('num_negatives') == self.num_negatives,
+                cfg.get('augmentation') == self.augmentation,
             ]
             if all(conds):
                 pt_file = os.path.join(os.path.dirname(config_file), name)
@@ -208,8 +211,30 @@ class ClassificationConfig(ConfigBase):
         return candidates
 
     def _find_simclr_models(self, config_files: list, name: str):
-        raise NotImplementedError
+        candidates = []
+        for config_file in config_files:
+            with open(config_file, 'r') as fp:
+                cfg = json.load(fp)
+            conds = [
+                cfg.get('data') == self.data,
+                cfg.get('input_size') == self.input_size,
+                cfg.get('backbone_type') == self.backbone_type,
+                cfg.get('backbone_config') == self.backbone_config,
+                cfg.get('projector_type') == self.projector_type,
+                cfg.get('projector_size') == self.projector_size,
+            ]
+            if all(conds):
+                pt_file = os.path.join(os.path.dirname(config_file), name)
+                if os.path.isfile(pt_file):
+                    candidates += [(pt_file, config_file)]
 
+        return candidates
+
+    def _find_semiclr_models(self, config_files: list, name: str):
+        return self._find_simclr_models(config_files, name)
+
+    def _find_attnclr_models(self, config_files: list, name: str):
+        return self._find_simclr_models(config_files, name)
 
 class DenoisingConfig(ConfigBase):
     """Configurations for Denoising."""
@@ -220,6 +245,7 @@ class DenoisingConfig(ConfigBase):
     def checkpoint_dir(self):
         ckpt = os.path.join(
             self.checkpoint_root,
+            self.data,
             self.task,
             self.model_name,
             self.hash,
@@ -245,6 +271,7 @@ class InpaintingConfig(ConfigBase):
     def checkpoint_dir(self):
         ckpt = os.path.join(
             self.checkpoint_root,
+            self.data,
             self.task,
             self.model_name,
             self.hash,
@@ -270,6 +297,7 @@ class JigsawConfig(ConfigBase):
     def checkpoint_dir(self):
         ckpt = os.path.join(
             self.checkpoint_root,
+            self.data,
             self.task,
             self.model_name,
             self.hash,
@@ -295,6 +323,7 @@ class RotationConfig(ConfigBase):
     def checkpoint_dir(self):
         ckpt = os.path.join(
             self.checkpoint_root,
+            self.data,
             self.task,
             self.model_name,
             self.hash,
@@ -320,6 +349,7 @@ class BiGANConfig(ConfigBase):
     def checkpoint_dir(self):
         ckpt = os.path.join(
             self.checkpoint_root,
+            self.data,
             self.task,
             self.model_name,
             self.hash,
@@ -345,8 +375,10 @@ class PIRLConfig(ConfigBase):
     def checkpoint_dir(self):
         ckpt = os.path.join(
             self.checkpoint_root,
+            self.data,
             self.task,
             self.model_name,
+            self.augmentation,
             self.hash,
         )
         os.makedirs(ckpt, exist_ok=True)
@@ -367,5 +399,41 @@ class SimCLRConfig(ConfigBase):
         super(SimCLRConfig, self).__init__(args, **kwargs)
 
     @property
+    def checkpoint_dir(self):
+        ckpt = os.path.join(
+            self.checkpoint_root,
+            self.data,
+            self.task,
+            self.model_name,
+            self.hash,
+        )
+        os.makedirs(ckpt, exist_ok=True)
+        return ckpt
+
+    @property
     def task(self):
         return 'simclr'
+
+    @property
+    def model_name(self):
+        return f'{self.backbone_type}.{self.backbone_config}'
+
+
+class SemiCLRConfig(SimCLRConfig):
+    """Configurations for SemiCLR."""
+    def __init__(self, args, **kwargs):
+        super(SemiCLRConfig, self).__init__(args, **kwargs)
+
+    @property
+    def task(self):
+        return 'semiclr'
+
+
+class AttnCLRConfig(SimCLRConfig):
+    """Configurations for AttnCLR."""
+    def __init__(self, args, **kwargs):
+        super(AttnCLRConfig, self).__init__(args, **kwargs)
+
+    @property
+    def task(self):
+        return 'attnclr'

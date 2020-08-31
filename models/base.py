@@ -11,8 +11,8 @@ import torch.nn as nn
 class BackboneBase(nn.Module):
     def __init__(self, layer_config: list, in_channels: int):
         super(BackboneBase, self).__init__()
-        assert isinstance(layer_config, (list, dict))
-        assert in_channels in [1, 2]
+        assert isinstance(layer_config, (str, list, dict))
+        assert in_channels in [1, 2, 3]
 
     def forward(self, x):
         raise NotImplementedError
@@ -52,7 +52,9 @@ class BackboneBase(nn.Module):
             path: str, path to pretrained `.pt` file.
             key: str, key to retrieve the model from a state dictionary of pretrained modules.
         """
-        self.load_state_dict(torch.load(path)[key])
+        ckpt = torch.load(path, map_location='cpu')
+        self.load_state_dict(ckpt[key])
+        # self.to(self.device)
 
 
 class HeadBase(nn.Module):
@@ -75,7 +77,15 @@ class HeadBase(nn.Module):
             path: str, path to pretrained `.pt` file.
             key: str, key to retrieve the model from a state dictionary of pretrained modules.
         """
-        self.load_state_dict(torch.load(path)[key])
+        ckpt = torch.load(path, map_location='cpu')
+        self.load_state_dict(ckpt[key])
+        # self.to(self.device)
+
+
+class ConvHeadBase(HeadBase):
+    def __init__(self, input_shape: tuple, output_size: int):
+        super(ConvHeadBase, self).__init__(output_size)
+        assert len(input_shape) == 3, "(C, H, W)"
 
 
 class FlattenHeadBase(HeadBase):
@@ -92,9 +102,9 @@ class PoolingHeadBase(HeadBase):
 
 class DecoderBase(nn.Module):
     """Base class for decoders."""
-    def __init__(self, layer_config: list, input_shape: tuple, output_shape: tuple):
+    def __init__(self, layer_config: dict, input_shape: tuple, output_shape: tuple):
         super(DecoderBase, self).__init__()
-        assert isinstance(layer_config, list)
+        assert isinstance(layer_config, dict)
         assert len(input_shape) == 3, "(C, H, W)"
         assert len(output_shape) == 3, "(C, H, W)"
 
