@@ -1,20 +1,18 @@
 # -*- coding: utf-8 -*-
 
 import os
-import time
 import json
 import tqdm
 
 import torch
 import torch.nn as nn
 from torch.utils.tensorboard import SummaryWriter
-from torch.distributions import Bernoulli
-from kornia.filters import GaussianBlur2d
 
-from models.base import *
+from models.base import BackboneBase, DecoderBase
 from tasks.base import Task
 from datasets.wafer import get_dataloader
 from utils.logging import get_tqdm_config
+from utils.logging import make_epoch_description
 from utils.plotting import save_image_dpi
 
 
@@ -25,8 +23,9 @@ class Denoising(Task):
                  optimizer: torch.optim.Optimizer,
                  scheduler: torch.optim.lr_scheduler._LRScheduler,
                  loss_function: nn.Module,
-                 noise_function: nn.Module,
-                 metrics: dict, checkpoint_dir: str, write_summary: bool):
+                 metrics: dict,
+                 checkpoint_dir: str,
+                 write_summary: bool):
         super(Denoising, self).__init__()
 
         self.encoder = encoder
@@ -34,10 +33,11 @@ class Denoising(Task):
         self.optimizer = optimizer
         self.scheduler = scheduler
         self.loss_function = loss_function
-        self.noise_function = noise_function
         self.metrics = metrics if isinstance(metrics, dict) else None
+
         self.checkpoint_dir = checkpoint_dir
         os.makedirs(self.checkpoint_dir, exist_ok=True)
+
         self.writer = SummaryWriter(log_dir=self.checkpoint_dir) if write_summary else None
 
     def run(self, train_set, valid_set, epochs, batch_size, num_workers=0, device='cuda', **kwargs):
@@ -55,10 +55,10 @@ class Denoising(Task):
         self.encoder = self.encoder.to(device)
         self.decoder = self.decoder.to(device)
 
-        train_loader = get_dataloader(train_set, batch_size, shuffle=True, num_workers=num_workers)
-        valid_loader = get_dataloader(valid_set, batch_size, shuffle=False, num_workers=0)
+        train_loader = get_dataloader(train_set, batch_size, num_workers=num_workers)
+        valid_loader = get_dataloader(valid_set, batch_size, num_workers=num_workers)
 
-        with tqdm.tqdm(**get_tqdm_config(total=epochs, leave=True, color='blue')) as pbar:
+        with tqdm.tqdm(**get_tqdm_config(total=epochs, leave=True, color='cyan')) as pbar:
 
             best_valid_loss = float('inf')
             best_epoch = 0
@@ -66,7 +66,7 @@ class Denoising(Task):
             for epoch in range(1, epochs + 1):
 
                 # 0. Train & evaluate
-                train_history = self.train(train_loader, device=device, current_epoch=epoch)
+                train_history = self.train(train_loader, device=device)
                 valid_history = self.evaluate(valid_loader, device=device)
 
                 # 1. Epoch history (loss)
@@ -74,10 +74,11 @@ class Denoising(Task):
                     'loss': {
                         'train': train_history.get('loss'),
                         'valid': valid_history.get('loss')
-                    }
+                    },
                 }
-                # 2. Epoch history (Other metrics if provided)
-                if isinstance(self.metrics, dict):
+
+                # 2. Epoch history (other metrics if provided)
+                if self.metrics is not None:
                     raise NotImplementedError
 
                 # 3. Tensorboard
@@ -88,44 +89,51 @@ class Denoising(Task):
                             tag_scalar_dict=metric_dict,
                             global_step=epoch
                         )
+                    if self.scheduler is not None:
+                        self.writer.add_scalar(
+                            tag='lr',
+                            scalar_value=self.scheduler.get_last_lr()[0],
+                            global_step=epoch
+                        )
 
-                # 4. Save model if it is the current best
+                # 4-1. Save model if it is the current best
                 valid_loss = epoch_history['loss']['valid']
                 if valid_loss < best_valid_loss:
                     best_valid_loss = valid_loss
                     best_epoch = epoch
                     self.save_checkpoint(self.best_ckpt, epoch=epoch, **epoch_history)
-                    if kwargs.get('save_every', False):
-                        new_ckpt = os.path.join(
-                            self.checkpoint_dir,
-                            f'epoch_{epoch:04d}.loss_{valid_loss:.4f}.pt'
-                        )
+
+                # 4-2. Save intermediate models
+                if isinstance(kwargs.get('save_every'), int):
+                    if epoch % kwargs.get('save_every') == 0:
+                        new_ckpt = os.path.join(self.checkpoint_dir, f'epoch_{epoch:04d}.loss_{valid_loss:.4f}.pt')  # No need to save memory
                         self.save_checkpoint(new_ckpt, epoch=epoch, **epoch_history)
 
-                # 5. Update scheduler
-                if isinstance(self.scheduler, torch.optim.lr_scheduler.StepLR):
+                # 5. Update learning rate scheduler
+                if self.scheduler is not None:
                     self.scheduler.step()
-                elif isinstance(self.scheduler, torch.optim.lr_scheduler.ExponentialLR):
-                    self.scheduler.step()
-                elif isinstance(self.scheduler, torch.optim.lr_scheduler.ReduceLROnPlateau):
-                    self.scheduler.step(valid_loss)
 
                 # 6. Logging
-                desc = f" Epoch [{epoch:>04}/{epochs:>04}] ({best_epoch:04}) |"
-                for metric_name, metric_dict in epoch_history.items():
-                    for k, v in metric_dict.items():
-                        desc += f" {k}_{metric_name}: {v:.4f} |"
+                desc = make_epoch_description(
+                    history=epoch_history,
+                    current=epoch,
+                    total=epochs,
+                    best=best_epoch
+                )
                 pbar.set_description_str(desc)
                 pbar.update(1)
                 if logger is not None:
                     logger.info(desc)
 
-        # 7. Evaluate best model on test set (optional if `test_set` exists)
+        # 7. Save last model
+        self.save_checkpoint(self.last_ckpt, epoch=epoch, **epoch_history)
+
+        # 8. Test model (optional)
         if 'test_set' in kwargs.keys():
-            test_loader = get_dataloader(kwargs.get('test_set'), batch_size, num_workers=0)
+            test_loader = get_dataloader(kwargs.get('test_set'), batch_size, num_workers=num_workers)
             self.test(test_loader, device=device, logger=logger)
 
-    def train(self, data_loader: torch.utils.data.DataLoader, device: str, current_epoch: int):
+    def train(self, data_loader: torch.utils.data.DataLoader, device: str, **kwargs):  # pylint: disable=unused-argument
         """Train function defined for a single epoch."""
 
         train_loss = 0.
@@ -133,104 +141,98 @@ class Denoising(Task):
         self._set_learning_phase(train=True)
 
         with tqdm.tqdm(**get_tqdm_config(total=steps_per_epoch, leave=False, color='green')) as pbar:
-            for i, (x, _, m) in enumerate(data_loader):
+            for i, batch in enumerate(data_loader):
 
-                x, m = x.to(device), m.to(device)
+                x = batch['x'].to(device)  # 4d
+                y = batch['y'].to(device)  # 3d
 
                 self.optimizer.zero_grad()
-                _, _, decoded = self.predict(x, m, train=True)  # (B, 2, H, W)
-                loss = self.loss_function(decoded, x.detach().long().squeeze(1))
+                _, decoded = self.predict(x)  # `decoded` are logits (B, C, H, W)
+                loss = self.loss_function(decoded, y)
                 loss.backward()
                 self.optimizer.step()
 
-                train_loss += loss.item() * x.size(0)  # reverse 'average'
+                train_loss += loss.item()
 
-                desc = f" Batch [{i+1:>04}/{steps_per_epoch:>04}] "
-                desc += f" Loss: {train_loss / (data_loader.batch_size * (i + 1)):.4f} "
+                desc = f" Batch: [{i+1:>4}/{steps_per_epoch:>4}]"
+                desc += f" Loss: {train_loss/(i+1):.4f} "
                 pbar.set_description_str(desc)
                 pbar.update(1)
 
-        out = {'loss': train_loss / len(data_loader.dataset)}
+        out = {'loss': train_loss / steps_per_epoch}
         if isinstance(self.metrics, dict):
             raise NotImplementedError
 
         return out
 
-    def evaluate(self, data_loader: torch.utils.data.DataLoader, device: str):
+    def evaluate(self, data_loader: torch.utils.data.DataLoader, device: str, **kwargs):  # pylint: disable=unused-argument
         """Evaluate current model. A single pass through the given dataset."""
 
         valid_loss = 0.
+        steps_per_epoch = len(data_loader)
         self._set_learning_phase(train=False)
 
         with torch.no_grad():
-            for _, (x, _, m) in enumerate(data_loader):
+            for _, batch in enumerate(data_loader):
 
-                x, m = x.to(device), m.to(device)
-                _, _, decoded = self.predict(x, m, train=False)  # (B, 2, H, W)
-                loss = self.loss_function(decoded, x.long().squeeze(1))
-                valid_loss += loss.item() * x.size(0)
+                x = batch['x'].to(device)
+                y = batch['y'].to(device)
 
-        out = {'loss': valid_loss / len(data_loader.dataset)}
+                _, decoded = self.predict(x)
+                loss = self.loss_function(decoded, y)
+                valid_loss += loss.item()
+
+        out = {'loss': valid_loss / steps_per_epoch}
         if isinstance(self.metrics, dict):
             raise NotImplementedError
 
         return out
 
-    def predict(self, x: torch.Tensor, m: torch.Tensor = None, train: bool = False):
-        """Note that the output is a tuple of length 3."""
-
-        self._set_learning_phase(train)
-        x_with_noise = self.noise_function(x, m)
-        if self.encoder.in_channels == 2:
-            if m is None:
-                raise ValueError("Encoder requires a mask tensor `m`.")
-            model_input = torch.cat([x_with_noise, m], dim=1)
-        else:
-            model_input = x_with_noise
-        encoded = self.encoder(model_input)
+    def predict(self, x: torch.Tensor):
+        encoded = self.encoder(x)
         decoded = self.decoder(encoded)
+        return encoded, decoded
 
-        return x, x_with_noise, decoded
-
-    def test(self, data_loader: torch.utils.data.DataLoader, device: str, logger=None):
+    def test(self, data_loader: torch.utils.data.DataLoader, device: str, logger = None):
         """Evaluate best model on test data."""
 
-        self.load_model_from_checkpoint(self.best_ckpt)
-        best_history = self.load_history_from_checkpoint(self.best_ckpt)
+        def test_on_ckpt(ckpt: str):
+            """Load checkpoint history and add test metric values."""
+            self.load_model_from_checkpoint(ckpt)
+            ckpt_history = self.load_history_from_checkpoint(ckpt)
+            test_history = self.evaluate(data_loader, device)
+            for metric_name, metric_val in test_history.items():
+                ckpt_history[metric_name]['test'] = metric_val
+            return ckpt_history
 
-        test_history = self.evaluate(data_loader, device)
-        for metric_name, metric_val in test_history.items():
-            best_history[metric_name]['test'] = metric_val
+        def make_description(history: dict, prefix: str = ''):
+            desc = f" {prefix} ({history['epoch']:>4d}): "
+            for metric_name, metric_dict in history.items():
+                if metric_name == 'epoch':
+                    continue
+                for k, v in metric_dict.items():
+                    desc += f" {k}_{metric_name}: {v:.4f} |"
+            return desc
 
-        desc = f" Best model ({best_history.get('epoch', -1):04d}): "
-        for metric_name, metric_dict in best_history.items():
-            if metric_name == 'epoch':
-                continue
-            for k, v in metric_dict.items():
-                desc += f" {k}_{metric_name}: {v:.4f} |"
-
+        # 1. Best model
+        best_history = test_on_ckpt(self.best_ckpt)
+        desc = make_description(best_history, prefix='Best model')
         print(desc)
         if logger is not None:
             logger.info(desc)
 
-        # Save final loss & metrics to a single json file
         with open(os.path.join(self.checkpoint_dir, 'best_history.json'), 'w') as fp:
             json.dump(best_history, fp, indent=2)
 
-        # Visualize wafer bin maps
-        plot_dir = os.path.join(self.checkpoint_dir, 'visualizations')
-        os.makedirs(plot_dir, exist_ok=True)
-        with torch.no_grad():
-            self._set_learning_phase(train=False)
-            for i, (x, _, m) in enumerate(data_loader):
-                x, m = x.to(device), m.to(device)
-                x, x_with_noise, decoded = self.predict(x, m, train=False)
-                decoded = m * decoded.argmax(dim=1, keepdims=True).float()  # (B, 1, 40, 40)
-                self.visualize(
-                    *[x, x_with_noise, decoded], mask=m,
-                    root=plot_dir, start=data_loader.batch_size * i,
-                    )
-                break
+        # 2. Last model
+        last_history = test_on_ckpt(self.last_ckpt)
+        desc = make_description(last_history, prefix='Last model')
+        print(desc)
+        if logger is not None:
+            logger.info(desc)
+
+        with open(os.path.join(self.checkpoint_dir, 'last_history.json'), 'w') as fp:
+            json.dump(best_history, fp, indent=2)
 
     def _set_learning_phase(self, train: bool = True):
         if train:
@@ -266,7 +268,6 @@ class Denoising(Task):
         del ckpt['decoder']
         del ckpt['optimizer']
         del ckpt['scheduler']
-
         return ckpt
 
     @staticmethod
@@ -302,48 +303,3 @@ class Denoising(Task):
         for i, t in enumerate(tensors):
             filepath = os.path.join(root, f"{prefix}_{start+i:05d}.png")
             save_image_dpi(t, filepath, **plot_configs)
-
-
-class MaskedBernoulliNoise(nn.Module):
-    """
-    Adds noise to input by sampling from a Bernoulli distribution.
-    The range of noise is specified by [min_val, max_val].
-    """
-    def __init__(self, p: float, min_val: int = 0, max_val: int = 1):
-        super(MaskedBernoulliNoise, self).__init__()
-        self.bernoulli = Bernoulli(p)
-        self.min_val = min_val
-        self.max_val = max_val
-
-    def forward(self, x: torch.Tensor, m: torch.Tensor = None):
-        """
-        Arguments:
-            x: 4d (B, 1, H, W) torch tensor. 1 for defects, 0 for normal.
-            m: 4d (B, 1, H, W) torch tensor. 1 for valid wafer regions, 0 for out-of-border regions.
-        """
-        with torch.no_grad():
-            noise_mask = self.bernoulli.sample(x.size()).to(x.device)
-            noise_value = torch.randint_like(x, self.min_val, self.max_val + 1).to(x.device)
-            if m is not None:
-                noise_mask = noise_mask * m
-
-            return x * (1 - noise_mask) + noise_value * noise_mask
-
-
-class MaskedGaussianSmoothing(nn.Module):
-    """Applies Gaussian smoothing to the input."""
-    def __init__(self, kernel_size: int, sigma: float, border_type: str = 'reflect'):
-        super(MaskedGaussianSmoothing, self).__init__()
-        self.gblur2d = GaussianBlur2d(
-            kernel_size=(kernel_size, kernel_size),
-            sigma=(sigma, sigma),
-            border_type=border_type
-        )
-
-    def forward(self, x: torch.Tensor, m: torch.Tensor = None):
-        with torch.no_grad():
-            y = self.gblur2d(x)
-            if m is not None:
-                y = y * m + x * (1 - m)
-
-            return y

@@ -6,31 +6,99 @@ import tqdm
 
 import torch
 import torch.nn as nn
+
 from torch.utils.tensorboard import SummaryWriter
 from torch.distributions.categorical import Categorical
 
 from models.base import BackboneBase, HeadBase
 from tasks.base import Task
 from datasets.wafer import get_dataloader
-from utils.loss import NCELoss
+from utils.loss import PIRLLoss
 from utils.logging import get_tqdm_config
+from utils.logging import make_epoch_description
+
+
+class MemoryBank(object):
+    def __init__(self, size: tuple, device: str, weight: float = 0.5):
+
+        self.size = size
+        self.device = device
+        self.weight = weight
+
+        self.buffer = torch.zeros(*size, device=device)
+        self.initialized = False
+
+    def initialize(self,
+                   backbone: nn.Module,
+                   projector: nn.Module,
+                   data_loader: torch.utils.data.DataLoader):
+        """Initialize memory bank values with a forward pass of the model."""
+
+        backbone.eval()
+        projector.eval()
+
+        with tqdm.tqdm(desc="Initializing memory...", total=len(data_loader), dynamic_ncols=True) as pbar:
+
+            with torch.no_grad():
+                for _, batch in enumerate(data_loader):
+                    x = batch['x'].to(self.device, non_blocking=True)
+                    j = batch['idx']
+                    self.buffer[j, :] = projector(backbone(x)).detach()
+                    pbar.update(1)
+
+        self.intialized = True  # pylint: disable=attribute-defined-outside-init
+
+    def update(self, index: list, values: torch.Tensor):
+        """Update memory with exponentially weighted moving average."""
+        self.buffer[index, :] = self.weight * self.buffer[index, :] + (1 - self.weight) * values
+
+    def get_representations(self, index: int or tuple or list):
+        return self.buffer[index, :]
+
+    def get_negatives(self, size: int, exclude: int or tuple or list):
+        """
+        Sample negative examples from memory buffer of size `size`.
+        Indices in `exclude` will not be included.
+        """
+        logits = torch.ones(self.buffer.size(0), device=self.device)
+        logits[exclude] = 0
+        sample_size = torch.Size([size])
+        return self.buffer[Categorical(logits=logits).sample(sample_size), :]
+
+    def save(self, path: str, **kwargs):
+        ckpt = {
+            'weight': self.weight,
+            'buffer': self.buffer.detach().cpu(),
+        }
+        if kwargs:
+            ckpt.update(kwargs)
+        torch.save(ckpt, path)
+
+    def load(self, path: str):
+        ckpt = torch.load(path)
+        self.weight = ckpt['weight']
+        self.buffer = ckpt['buffer'].to(self.device)
+        self.initialized = True  # pylint: disable=attribute-defined-outside-init
 
 
 class PIRL(Task):
     def __init__(self,
                  backbone: BackboneBase,
                  projector: HeadBase,
-                 memory: object,
-                 noise_function: nn.Module,
+                 memory: MemoryBank,
                  optimizer: torch.optim.Optimizer,
                  scheduler: torch.optim.lr_scheduler._LRScheduler,
-                 loss_function: nn.Module,
-                 loss_weight: float, num_negatives: int,
-                 metrics: dict, checkpoint_dir: str, write_summary: bool):
+                 loss_function: PIRLLoss,
+                 loss_weight: float,
+                 num_negatives: int,
+                 metrics: dict,
+                 checkpoint_dir: str,
+                 write_summary: bool
+                 ):
         super(PIRL, self).__init__()
 
         assert isinstance(memory, MemoryBank)
-        assert isinstance(loss_function, NCELoss)
+        assert isinstance(loss_function, PIRLLoss)
 
         self.backbone = backbone
         self.projector = projector
@@ -41,13 +109,13 @@ class PIRL(Task):
         self.loss_weight = loss_weight
         self.num_negatives = num_negatives
         self.metrics = metrics if isinstance(metrics, dict) else None
+
         self.checkpoint_dir = checkpoint_dir
         os.makedirs(self.checkpoint_dir, exist_ok=True)
+
         self.writer = SummaryWriter(log_dir=self.checkpoint_dir) if write_summary else None
 
-        self.noise_function = noise_function
-
-    def run(self, train_set, valid_set, epochs, batch_size, num_workers=1, device='cuda', **kwargs):
+    def run(self, train_set, valid_set, epochs, batch_size, num_workers=0, device='cuda', **kwargs):  # pylint: disable=unused-argument
 
         assert isinstance(train_set, torch.utils.data.Dataset)
         assert isinstance(valid_set, torch.utils.data.Dataset)
@@ -61,8 +129,8 @@ class PIRL(Task):
         self.backbone = self.backbone.to(device)
         self.projector = self.projector.to(device)
 
-        train_loader = get_dataloader(train_set, batch_size, shuffle=True, num_workers=num_workers)
-        valid_loader = get_dataloader(valid_set, batch_size, shuffle=False, num_workers=num_workers // 2)
+        train_loader = get_dataloader(train_set, batch_size, num_workers=num_workers)
+        valid_loader = get_dataloader(valid_set, batch_size, num_workers=num_workers)
 
         # Initialize training memory
         if not self.memory.initialized:
@@ -76,8 +144,8 @@ class PIRL(Task):
             for epoch in range(1, epochs + 1):
 
                 # 0. Train & evaluate
-                train_history = self.train(train_loader, device)
-                valid_history = self.evaluate(valid_loader, device)
+                train_history = self.train(train_loader, device=device)
+                valid_history = self.evaluate(valid_loader, device=device)
 
                 # 1. Epoch history (loss)
                 epoch_history = {
@@ -85,19 +153,16 @@ class PIRL(Task):
                         'train': train_history.get('loss'),
                         'valid': valid_history.get('loss')
                     },
-                    'original': {
-                        'train': train_history.get('original'),
-                        'valid': valid_history.get('original'),
-                    },
-                    'transformed': {
-                        'train': train_history.get('transformed'),
-                        'valid': valid_history.get('transformed')
-                    }
                 }
 
                 # 2. Epoch history (other metrics if provided)
                 if self.metrics is not None:
-                    raise NotImplementedError
+                    assert isinstance(self.metrics, dict)
+                    for metric_name, _ in self.metrics.items():
+                        epoch_history[metric_name] = {
+                            'train': train_history.get(metric_name),
+                            'valid': valid_history.get(metric_name),
+                        }
 
                 # 3. Tensorboard
                 if self.writer is not None:
@@ -105,6 +170,12 @@ class PIRL(Task):
                         self.writer.add_scalars(
                             main_tag=metric_name,
                             tag_scalar_dict=metric_dict,
+                            global_step=epoch
+                        )
+                    if self.scheduler is not None:
+                        self.writer.add_scalar(
+                            tag='lr',
+                            scalar_value=self.scheduler.get_last_lr()[0],
                             global_step=epoch
                         )
 
@@ -115,215 +186,179 @@ class PIRL(Task):
                     best_epoch = epoch
                     self.save_checkpoint(self.best_ckpt, epoch=epoch, **epoch_history)
                     self.memory.save(os.path.join(os.path.dirname(self.best_ckpt), 'best_memory.pt'), epoch=epoch)
-                    if kwargs.get('save_every', False):
-                        new_ckpt = os.path.join(
-                            self.checkpoint_dir,
-                            f'epoch_{epoch:04d}.loss_{valid_loss:.4f}.pt'
-                        )
+                
+                # 4-2. Save intermediate models
+                if isinstance(kwargs.get('save_every'), int):
+                    if epoch % kwargs.get('save_every') == 0:
+                        new_ckpt = os.path.join(self.checkpoint_dir, f'epoch_{epoch:04d}.loss_{valid_loss:.4f}.pt')  # No need to save memory
                         self.save_checkpoint(new_ckpt, epoch=epoch, **epoch_history)
 
-                # 4-2. Update scheduler
-                if isinstance(self.scheduler, torch.optim.lr_scheduler.StepLR):
-                    self.scheduler.step()
-                elif isinstance(self.scheduler, torch.optim.lr_scheduler.ReduceLROnPlateau):
-                    self.scheduler.step(valid_loss)
-                elif isinstance(self.scheduler, torch.optim.lr_scheduler.CosineAnnealingLR):
-                    self.scheduler.step()
-                elif isinstance(self.scheduler, torch.optim.lr_scheduler.CosineAnnealingWarmRestarts):
+                # 5. Update learning rate scheduler
+                if self.scheduler is not None:
                     self.scheduler.step()
 
-                # 5. Logging
-                desc = f" Epoch [{epoch:>04}/{epochs:>04}] ({best_epoch:04}) |"
-                for metric_name, metric_dict in epoch_history.items():
-                    for k, v in metric_dict.items():
-                        desc += f" {k}_{metric_name}: {v:.4f} |"
+                # 6. Logging
+                desc = make_epoch_description(
+                    history=epoch_history,
+                    current=epoch,
+                    total=epochs,
+                    best=best_epoch
+                )
                 pbar.set_description_str(desc)
                 pbar.update(1)
                 if logger is not None:
                     logger.info(desc)
 
-        # 6. Save last model
+        # 7. Save last model
         self.save_checkpoint(self.last_ckpt, epoch=epoch, **epoch_history)
         self.memory.save(os.path.join(os.path.dirname(self.last_ckpt), 'last_memory.pt'), epoch=epoch)
 
-        # 7. Evaluate best model on test set (optional if `test_set` is given)
+        # 8. Test model (optional)
         if 'test_set' in kwargs.keys():
-            test_loader = get_dataloader(kwargs.get('test_set'), batch_size, num_workers=num_workers // 2)
+            test_loader = get_dataloader(kwargs.get('test_set'), batch_size, num_workers=num_workers)
             self.test(test_loader, device=device, logger=logger)
 
-    def train(self, data_loader: torch.utils.data.DataLoader, device: str, **kwargs):
+    def train(self, data_loader: torch.utils.data.DataLoader, device: str, **kwargs):  # pylint: disable=unused-argument
         """Train function defined for a single epoch."""
 
+        preds = []
         train_loss = 0.
-        loss_T = 0.
-        loss_O = 0.
-        num_samples = len(data_loader.dataset)
         steps_per_epoch = len(data_loader)
         self._set_learning_phase(train=True)
 
         with tqdm.tqdm(**get_tqdm_config(steps_per_epoch, leave=False, color='green')) as pbar:
             for i, batch in enumerate(data_loader):
 
-                x, m = batch['x'].to(device), batch['m'].to(device)
-                x_t, m_t = batch['x_t'].to(device), batch['m_t'].to(device)
-                j = batch['idx']
+                j  = batch['idx']
+                x  = batch['x'].to(device)
+                x_t = batch['x_t'].to(device)
 
-                if self.noise_function is not None:
-                    x_t = self.noise_function(x_t, m_t)
+                z = self.predict(x)
+                z_t = self.predict(x_t)
 
-                self.optimizer.zero_grad()
-                original_features = self.predict(x, m)
-                transformed_features = self.predict(x_t, m_t)
-
-                representations = self.memory.get_representations(j).to(device)
+                m = self.memory.get_representations(j).to(device)
                 negatives = self.memory.get_negatives(self.num_negatives, exclude=j)
 
-                transformed_loss = self.loss_function(
-                    queries=representations,
-                    positives=transformed_features,
-                    negatives=negatives
-                    )
-                original_loss = self.loss_function(
-                    queries=representations,
-                    positives=original_features,
-                    negatives=negatives
-                    )
-                loss = self.loss_weight * transformed_loss + \
-                    (1 - self.loss_weight) * original_loss
+                # Calculate loss
+                loss_z, _ = self.loss_function(
+                    anchors=m,
+                    positives=z,
+                    negatives=negatives,
+                )
+                loss_z_t, logits = self.loss_function(
+                    anchors=m,
+                    positives=z_t,
+                    negatives=negatives,
+                )
+                loss = (1 - self.loss_weight)  * loss_z + self.loss_weight * loss_z_t
+
+                # Backpropagation & update
                 loss.backward()
                 self.optimizer.step()
+                self.optimizer.zero_grad()
+                self.memory.update(j, values=z.detach())
 
-                # Update memory bank
-                self.memory.update(j, original_features.detach())
+                train_loss += loss.detach().item()
+                preds += [logits.detach().cpu()]
 
-                loss_T += transformed_loss.item() * x.size(0)
-                loss_O += original_loss.item() * x.size(0)
-                train_loss += loss.item() * x.size(0)
-
-                desc = f" Batch [{i+1:>04}/{steps_per_epoch:>04}]"
-                desc += f" Loss: {train_loss / (data_loader.batch_size * (i + 1)):.4f} "
+                desc = f" Batch: [{i+1:>4}/{steps_per_epoch:>4}]"
+                desc += f" Loss: {train_loss/(i+1):.4f} "
                 pbar.set_description_str(desc)
                 pbar.update(1)
 
-            # Update weighted count at the end of each epoch
-            self.memory.update_weighted_count()
-
-        out = {
-            'loss': train_loss / num_samples,
-            'transformed': loss_T / num_samples,
-            'original': loss_O / num_samples,
-            }
+        out = {'loss': train_loss / steps_per_epoch}
         if self.metrics is not None:
-            raise NotImplementedError
+            assert isinstance(self.metrics, dict)
+            with torch.no_grad():
+                preds = torch.cat(preds, dim=0)                          # (N, 1+ num_negatives)
+                trues = torch.zeros(preds.size(0), device=preds.device)  # (N, )
+                for metric_name, metric_function in self.metrics.items():
+                    out[metric_name] = metric_function(preds, trues).item()
 
         return out
 
-    def evaluate(self, data_loader: torch.utils.data.DataLoader, device: str, **kwargs):
+    def evaluate(self, data_loader: torch.utils.data.DataLoader, device: str, **kwargs):  # pylint: disable=unused-argument
         """Evaluate current model. A single pass through the given dataset."""
 
+        preds = []
         valid_loss = 0.
-        loss_T = 0.
-        loss_O = 0.
-        num_samples = len(data_loader.dataset)
+        steps_per_epoch = len(data_loader)
         self._set_learning_phase(train=False)
 
         with torch.no_grad():
             for _, batch in enumerate(data_loader):
 
-                x, m = batch['x'].to(device), batch['m'].to(device)
-                x_t, m_t = batch['x_t'].to(device), batch['m_t'].to(device)
+                x, x_t = batch['x'].to(device), batch['x_t'].to(device)
                 j = batch['idx']
 
-                if self.noise_function is not None:
-                    x_t = self.noise_function(x_t, m_t)
-
-                original_features = self.predict(x, m)
-                transformed_features = self.predict(x_t, m_t)
+                z = self.predict(x)
+                z_t = self.predict(x_t)
 
                 negatives = self.memory.get_negatives(self.num_negatives, exclude=j)
 
-                transformed_loss = self.loss_function(
-                    queries=original_features,
-                    positives=transformed_features,
-                    negatives=negatives
-                    )
-                original_loss = self.loss_function(
-                    queries=original_features,
-                    positives=original_features,
-                    negatives=negatives
-                    )
+                # Note that no memory representation (m) exists for the validation data.
+                loss, logits = self.loss_function(
+                    anchors=z,
+                    positives=z_t,
+                    negatives=negatives,
+                )
 
-                loss = self.loss_weight * transformed_loss \
-                    + (1 - self.loss_weight) * original_loss
-                valid_loss += loss.item() * x.size(0)
-                loss_T += transformed_loss.item() * x.size(0)
-                loss_O += original_loss.item() * x.size(0)
+                valid_loss += loss.item()
+                preds += [logits.detach().cpu()]
 
-            out = {
-                'loss': valid_loss / num_samples,
-                'transformed': loss_T / num_samples,
-                'original': loss_O / num_samples,
-                }
+            out = {'loss': valid_loss / steps_per_epoch}
             if self.metrics is not None:
-                raise NotImplementedError
+                assert isinstance(self.metrics, dict)
+                preds = torch.cat(preds, dim=0)                          # (N, 1+ num_negatives)
+                trues = torch.zeros(preds.size(0), device=preds.device)  # (N, )
+                for metric_name, metric_function in self.metrics.items():
+                    out[metric_name] = metric_function(preds, trues).item()
 
             return out
 
-    def predict(self, x: torch.Tensor, m: torch.Tensor = None, train: bool = False):
-        self._set_learning_phase(train)
-        if self.backbone.in_channels == 2:
-            if m is None:
-                raise ValueError("Backbone requires a mask tensor `m`.")
-            x = torch.cat([x, m], dim=1)
+    def predict(self, x: torch.Tensor):
         return self.projector(self.backbone(x))
 
-    def test(self, data_loader: torch.utils.data.DataLoader, device: str, logger=None):
+    def test(self, data_loader: torch.utils.data.DataLoader, device: str, logger = None):
         """Evaluate best model on test data."""
 
         def test_on_ckpt(ckpt: str):
             """Load checkpoint history and add test metric values."""
-            
             self.load_model_from_checkpoint(ckpt)
-            self.memory.load(ckpt.replace('_model.pt', '_memory.pt'))
             ckpt_history = self.load_history_from_checkpoint(ckpt)
-
             test_history = self.evaluate(data_loader, device)
             for metric_name, metric_val in test_history.items():
                 ckpt_history[metric_name]['test'] = metric_val
-
             return ckpt_history
 
-        # 1. Best model (based on validation loss)
-        best_history = test_on_ckpt(self.best_ckpt)
-        desc = f" Best model ({best_history.get('epoch', -1):04d}): "
-        for metric_name, metric_dict in best_history.items():
-            if metric_name == 'epoch':
-                continue
-            for k, v in metric_dict.items():
-                desc += f" {k}_{metric_name}: {v:.4f} |"
+        def make_description(history: dict, prefix: str = ''):
+            desc = f" {prefix} ({history['epoch']:>4d}): "
+            for metric_name, metric_dict in history.items():
+                if metric_name == 'epoch':
+                    continue
+                for k, v in metric_dict.items():
+                    desc += f" {k}_{metric_name}: {v:.4f} |"
+            return desc
 
+        # 1. Best model
+        best_history = test_on_ckpt(self.best_ckpt)
+        desc = make_description(best_history, prefix='Best model')
         print(desc)
         if logger is not None:
             logger.info(desc)
 
-        with open(os.path.join(self.checkpoint_dir, "best_history.json"), 'w') as fp:
+        with open(os.path.join(self.checkpoint_dir, 'best_history.json'), 'w') as fp:
             json.dump(best_history, fp, indent=2)
 
         # 2. Last model
         last_history = test_on_ckpt(self.last_ckpt)
-        desc = f" Last model ({last_history.get('epoch', -1):04d}): "
-        for metric_name, metric_dict in last_history.items():
-            if metric_name == 'epoch':
-                continue
-            for k, v in metric_dict.items():
-                desc += f" {k}_{metric_name}: {v:.4f} |"
-
+        desc = make_description(last_history, prefix='Last model')
         print(desc)
         if logger is not None:
             logger.info(desc)
 
-        with open(os.path.join(self.checkpoint_dir, "last_history.json"), 'w') as fp:
-            json.dump(last_history, fp, indent=2)
+        with open(os.path.join(self.checkpoint_dir, 'last_history.json'), 'w') as fp:
+            json.dump(best_history, fp, indent=2)
 
     def _set_learning_phase(self, train=False):
         if train:
@@ -345,7 +380,7 @@ class PIRL(Task):
             ckpt.update(kwargs)
         torch.save(ckpt, path)
 
-    def load_model_from_checkpoint(self, path: str, **kwargs):
+    def load_model_from_checkpoint(self, path: str):
         ckpt = torch.load(path)
         self.backbone.load_state_dict(ckpt['backbone'])
         self.projector.load_state_dict(ckpt['projector'])
@@ -360,71 +395,3 @@ class PIRL(Task):
         del ckpt['optimizer']
         del ckpt['scheduler']
         return ckpt
-
-
-class MemoryBank(object):
-    def __init__(self, size: tuple, device: str):
-        self.device = device
-        self.weight = .5
-        self.weighted_count = 0
-        self.buffer = torch.zeros(*size).to(self.device)
-        self.weighted_sum = torch.zeros_like(self.buffer)
-        self.initialized = False
-
-    def initialize(self,
-                   backbone: nn.Module,
-                   projector: nn.Module,
-                   train_loader: torch.utils.data.DataLoader):
-        self.update_weighted_count()
-
-        with tqdm.tqdm(desc="Initializing", total=len(train_loader), dynamic_ncols=True) as pbar:
-
-            with torch.no_grad():
-                for _, batch in enumerate(train_loader):
-                    x, m = batch['x'].to(self.device), batch['m'].to(self.device)
-                    j = batch['idx']
-                    if backbone.in_channels == 2:
-                        x = torch.cat([x, m], dim=1)
-                    self.weighted_sum[j, :] = projector(backbone(x)).detach()
-                    self.buffer[j, :] = self.weighted_sum[j, :]
-                    pbar.update(1)
-
-        self.intialized = True
-
-    def update(self, index: list, values: torch.Tensor):
-        """Update memory with weighted moving average."""
-        self.weighted_sum[index, :] = \
-            values.to(self.device) + (1 - self.weight) * self.weighted_sum[index, :]
-        self.buffer[index, :] = \
-            self.weighted_sum[index, :] / self.weighted_count
-
-    def update_weighted_count(self):
-        self.weighted_count = 1 + (1 - self.weight) * self.weighted_count
-
-    def get_representations(self, index: int or tuple or list):
-        return self.buffer[index]
-
-    def get_negatives(self, size: int, exclude: int or tuple or list):
-        logits = torch.ones(self.buffer.size(0), device=self.device)
-        logits[exclude] = 0
-        sample_size = torch.Size([size])
-        return self.buffer[Categorical(logits=logits).sample(sample_size), :]
-
-    def save(self, path: str, **kwargs):
-        ckpt = {
-            'weight': self.weight,
-            'weighted_count': self.weighted_count,
-            'buffer': self.buffer.cpu(),
-            'weighted_sum': self.weighted_sum.cpu(),
-        }
-        if kwargs:
-            ckpt.update(kwargs)
-        torch.save(ckpt, path)
-
-    def load(self, path: str):
-        ckpt = torch.load(path)
-        self.weight = ckpt['weight']
-        self.weighted_count = ckpt['weighted_count']
-        self.buffer = ckpt['buffer'].to(self.device)
-        self.weighted_sum = ckpt['weighted_sum'].to(self.device)
-        self.initialized = True
