@@ -5,195 +5,243 @@ import sys
 import argparse
 
 import torch
+import numpy as np
 
-from tasks import Classification
-from models.config import ClassificationConfig, VGG_BACKBONE_CONFIGS, RESNET_BACKBONE_CONFIGS
-from models.vgg import VGGBackbone
+from datasets.wafer import WM811K
+from datasets.cifar import CustomCIFAR10
+from datasets.transforms import get_transform
+
+from models.config import ClassificationConfig
+from models.config import ALEXNET_BACKBONE_CONFIGS
+from models.config import VGGNET_BACKBONE_CONFIGS
+from models.config import RESNET_BACKBONE_CONFIGS
+from models.alexnet import AlexNetBackbone
+from models.vggnet import VggNetBackbone
 from models.resnet import ResNetBackbone
 from models.head import GAPClassifier
-from datasets.wafer import LabeledWM811kFolder
-from datasets.transforms import BasicTransform
+
+from tasks.classification import Classification
+
 from utils.loss import LabelSmoothingLoss
-from utils.metrics import MultiAccuracy, MultiF1Score
-from utils.optimization import get_optimizer, get_scheduler
 from utils.logging import get_logger
+from utils.metrics import MultiAccuracy, MultiF1Score, MultiAUPRC
+from utils.optimization import get_optimizer, get_scheduler
 
 
 AVAILABLE_MODELS = {
-    'vgg': (VGG_BACKBONE_CONFIGS, ClassificationConfig, VGGBackbone, GAPClassifier),
-    'resnet': (RESNET_BACKBONE_CONFIGS, ClassificationConfig, ResNetBackbone, GAPClassifier),
+    'alexnet': (ALEXNET_BACKBONE_CONFIGS, ClassificationConfig, AlexNetBackbone),
+    'vggnet': (VGGNET_BACKBONE_CONFIGS, ClassificationConfig, VggNetBackbone),
+    'resnet': (RESNET_BACKBONE_CONFIGS, ClassificationConfig, ResNetBackbone),
 }
 
-FINETUNE_TYPES = {
-    'end_to_end': 0,
-    'freeze': 1,
-    'blockwise_learning_rates': 2,
+CLASSIFIER_TYPES = {
+    'linear': GAPClassifier,
+    'mlp': None,
 }
 
-NUM_CLASSES = LabeledWM811kFolder.NUM_CLASSES
+IN_CHANNELS = {
+    "wm811k": 2,
+    "cifar10": 3,
+    "stl10": 3,
+    "imagenet": 3,
+}
+
+NUM_CLASSES = {
+    "wm811k": 9,
+    "cifar10": 10,
+    "stl10": None,
+    "imagenet": 1000,
+}
 
 
 def parse_args():
     """Parse command line arguments."""
 
-    parser = argparse.ArgumentParser("Classification on Wafer40.", add_help=True)
+    parser = argparse.ArgumentParser("Downstream classification, supports both linear evaluation & fine-tuning.", add_help=True)
 
-    g1 = parser.add_argument_group('General')
-    g1.add_argument('--data_index', type=int, required=True)
-    g1.add_argument('--input_size', type=int, default=112, choices=(32, 64, 112, 224))
-    g1.add_argument('--disable_benchmark', action='store_true', help='Benchmark mode is faster for fixed size inputs.')
+    g0 = parser.add_argument_group('Randomness')
+    g0.add_argument('--seed', type=int, required=True)
 
-    g2 = parser.add_argument_group('Backbone')
-    g2.add_argument('--backbone_type', type=str, default=None, choices=('vgg', 'resnet'), required=True)
-    g2.add_argument('--backbone_config', type=str, default=None, required=True)
-    g2.add_argument('--in_channels', type=int, default=2, choices=(1, 2))
+    g1 = parser.add_argument_group('Data')
+    g1.add_argument('--data', type=str, choices=('wm811k', 'cifar10', 'stl10', 'imagenet'), required=True)
+    g1.add_argument('--input_size', type=int, choices=(32, 64, 96, 112, 224), required=True)
 
-    g4 = parser.add_argument_group('Training')
-    g4.add_argument('--labeled', type=float, default=1.0, help='Proportion of labeled data.')
-    g4.add_argument('--balance', action='store_true', help='Balance class label distribution.')
-    g4.add_argument('--epochs', type=int, default=100, help='Number of training epochs.')
-    g4.add_argument('--batch_size', type=int, default=256, help='Batch size used during training.')
-    g4.add_argument('--num_workers', type=int, default=0, help='Number of cpu threads for data loading.')
+    g2 = parser.add_argument_group('CNN Backbone')
+    g2.add_argument('--backbone_type', type=str, choices=('alexnet', 'vggnet', 'resnet'), required=True)
+    g2.add_argument(
+        '--backbone_config',
+        type=str,
+        choices=(
+            'batch_norm',                                # alexnet
+            '16.batch_norm',                             # vggnet
+            '18.original', '34.original', '50.original'  # resnet
+        ),
+        required=True)
+
+    g3 = parser.add_argument_group('Classification')
+    g3.add_argument('--freeze', action='store_true', help='for linear evaluation, freeze backbone weights.')
+    g3.add_argument('--label_proportion', type=float, default=1.0, help='proportion of labeled data. (0, 1].')
+
+    g4 = parser.add_argument_group('Model Training')
+    g4.add_argument('--epochs', type=int, default=100, help='number of training epochs.')
+    g4.add_argument('--batch_size', type=int, default=256, help='batch size used during training.')
+    g4.add_argument('--num_workers', type=int, default=0, help='number of cpu threads for data loading.')
     g4.add_argument('--device', type=str, default='cuda', choices=['cuda', 'cuda:0', 'cuda:1', 'cuda:2', 'cuda:3', 'cpu'])
+    g4.add_argument('--augmentation', type=str, default='rotate', 
+                    choices=['crop', 'rotate', 'cutout', 'shift', 'noise', 'test', 'crop+rotate', 'shift+crop+rotate', 'shift+crop+rotate+cutout+noise']
+    )
 
     g5 = parser.add_argument_group('Regularization')
-    g5.add_argument('--dropout', type=float, default=0.0, help='Dropout rate in fully-connected layers.')
-    g5.add_argument('--smoothing', type=float, default=0.0, help='Zero equals general cross entropy loss.')
-    g5.add_argument('--class_weights', action='store_true', help='Calculate class weights.')
+    g5.add_argument('--dropout', type=float, default=0.0, help='dropout rate in fully-connected layers.')
+    g5.add_argument('--smoothing', type=float, default=0.0, help='label smoothing ratio.')
+    g5.add_argument('--balance', action='store_true', help='Balance class distribution within batches.')
 
     g6 = parser.add_argument_group('Optimizer')
-    g6.add_argument('--optimizer', type=str, default='adamw', choices=('adamw', 'sgd'))
-    g6.add_argument('--learning_rate', type=float, default=0.001)
-    g6.add_argument('--weight_decay', type=float, default=0.01)
-    g6.add_argument('--optimizer_kwargs', nargs='+', default=[], help="Additional arguments for optimizers.")
+    g6.add_argument('--optimizer', type=str, default='sgd', choices=('sgd', 'adamw', 'lars'))
+    g6.add_argument('--learning_rate', type=float, default=0.01)
+    g6.add_argument('--weight_decay', type=float, default=0.001)
+    g6.add_argument('--momentum', type=float, default=0.9, help='only for SGD.')
 
     g7 = parser.add_argument_group('Scheduler')
-    g7.add_argument('--scheduler', type=str, default=None, choices=('step', 'multi_step', 'plateau', 'cosine', 'restart'))
-    g7.add_argument('--scheduler_kwargs', nargs='+', default=[], help="Arguments for learning rate scheduling.")
+    g7.add_argument('--scheduler', type=str, default=None, choices=('step', 'cosine', 'restart', 'none'))
+    g7.add_argument('--milestone', type=int, default=None, help='For step decay.')
+    g7.add_argument('--warmup_steps', type=int, default=0, help='For linear warmups.')
+    g7.add_argument('--cycles', type=int, default=1, help='For hard restarts.')
 
     g8 = parser.add_argument_group('Logging')
     g8.add_argument('--checkpoint_root', type=str, default='./checkpoints/')
     g8.add_argument('--write_summary', action='store_true', help='Write summaries with TensorBoard.')
     g8.add_argument('--eval_metric', type=str, default='loss', choices=('loss', 'f1', 'accuracy'))
 
-    g9 = parser.add_argument_group('Fine-tuning')
-    g9_finetune = g9.add_mutually_exclusive_group()
-    g9_finetune.add_argument('--freeze', nargs='+', default=[], help='Freeze the weights of backbone blocks.')
-    g9_finetune.add_argument('--blockwise_learning_rates', nargs='+', default=[], help='Set blockwise learning rates of backbone.')
-
+    # Subparsers are defined for configuring pretrained models.
     subparsers = parser.add_subparsers(title='Pretext Tasks')
 
     scratch = subparsers.add_parser('scratch', add_help=True)
     scratch.set_defaults(pretext=None)
 
     denoising = subparsers.add_parser('denoising', add_help=True)
-    denoising.add_argument('--root', type=str, default=None)
-    denoising.add_argument('--noise', type=float, default=0.1)
+    denoising.add_argument('--root', type=str, required=True)
+    denoising.add_argument('--noise', type=float, default=0., choices=[0.0, 0.01, 0.05, 0.1])
     denoising.set_defaults(pretext='denoising')
 
     inpainting = subparsers.add_parser('inpainting', add_help=True)
-    inpainting.add_argument('--root', type=str, default=None)
+    inpainting.add_argument('--root', type=str, required=True)
     inpainting.add_argument('--size', type=tuple, default=(10, 10))
     inpainting.set_defaults(pretext='inpainting')
 
     jigsaw = subparsers.add_parser('jigsaw', add_help=True)
-    jigsaw.add_argument('--root', type=str, default=None)
+    jigsaw.add_argument('--root', type=str, required=True)
     jigsaw.add_argument('--num_patches', type=int, default=9, choices=(4, 9, 16, 25))
     jigsaw.add_argument('--num_permutations', type=int, default=100, choices=(50, 100))
     jigsaw.set_defaults(pretext='jigsaw')
 
     rotation = subparsers.add_parser('rotation', add_help=True)
-    rotation.add_argument('--root', type=str, default=None)
+    rotation.add_argument('--root', type=str, required=True)
     rotation.set_defaults(pretext='rotation')
 
     bigan = subparsers.add_parser('bigan', add_help=True)
-    bigan.add_argument('--root', type=str, default=None)
+    bigan.add_argument('--root', type=str, required=True)
     bigan.add_argument('--gan_type', type=str, default='dcgan', choices=('dcgan', 'vgg'))
     bigan.add_argument('--gan_config', type=str, default=None, choices=('3', '6', '9'))
     bigan.set_defaults(pretext='bigan')
 
     pirl = subparsers.add_parser('pirl', add_help=True)
-    pirl.add_argument('--root', type=str, default=None)
-    pirl.add_argument('--model_type', type=str, default='best', choices=('best', 'last'))
+    pirl.add_argument('--root', type=str, required=True)
     pirl.add_argument('--projector_type', type=str, default='linear', choices=('linear', 'mlp'))
     pirl.add_argument('--projector_size', type=int, default=128)
     pirl.add_argument('--num_negatives', type=int, default=5000)
-    pirl.add_argument('--noise', type=float, default=0.05)
-    pirl.add_argument('--rotate', action='store_true')
     pirl.set_defaults(pretext='pirl')
 
-    npid = subparsers.add_parser('npid', add_help=True)
-    npid.add_argument('--root', type=str, default=None)
-    npid.set_defaults(pretext='npid')
-
     moco = subparsers.add_parser('moco', add_help=True)
-    moco.add_argument('--root', type=str, default=None)
+    moco.add_argument('--root', type=str, required=True)
     moco.set_defaults(pretext='moco')
 
     simclr = subparsers.add_parser('simclr', add_help=True)
-    simclr.add_argument('--root', type=str, default=None)
+    simclr.add_argument('--root', type=str, required=True)
+    simclr.add_argument('--projector_type', type=str, default='mlp', choices=('linear', 'mlp'))
+    simclr.add_argument('--projector_size', type=int, default=128)
     simclr.set_defaults(pretext='simclr')
 
-    args = parser.parse_args()
+    semiclr = subparsers.add_parser('semiclr', add_help=True)
+    semiclr.add_argument('--root', type=str, required=True)
+    semiclr.add_argument('--projector_type', type=str, default='mlp', choices=('linear', 'mlp'))
+    semiclr.add_argument('--projector_size', type=int, default=128)
+    semiclr.set_defaults(pretext='semiclr')
 
-    if args.pretext is not None:
-        assert args.root is not None, "Provide a root directory under which a pretrained model might exist."
+    attnclr = subparsers.add_parser('attnclr', add_help=True)
+    attnclr.add_argument('--root', type=str, required=True)
+    attnclr.add_argument('--projector_type', type=str, default='mlp', choices=('linear', 'mlp'))
+    attnclr.add_argument('--projector_size', type=int, default=128)
+    attnclr.set_defaults(pretext='attnclr')
 
-    def get_kwargs(l: list):
-        out = {}
-        for kv in l:
-            k, v = kv.split('=')
-            if '.' in v:
-                v = float(v)
-            else:
-                try:
-                    v = int(v)
-                except ValueError:
-                    v = str(v)
-            out[k] = v
-
-        return out
-
-    opt_kwargs = get_kwargs(args.optimizer_kwargs)
-    setattr(args, 'optimizer_kwargs', opt_kwargs)
-
-    sch_kwargs = get_kwargs(args.scheduler_kwargs)
-    setattr(args, 'scheduler_kwargs', sch_kwargs)
-
-    blr_kwargs = get_kwargs(args.blockwise_learning_rates)
-    setattr(args, 'blockwise_learning_rates', blr_kwargs)
-
-    if len(args.freeze) > 0:
-        setattr(args, 'finetune_type', FINETUNE_TYPES['freeze'])
-    elif len(args.blockwise_learning_rates) > 0:
-        setattr(args, 'finetune_type', FINETUNE_TYPES['blockwise_learning_rates'])
-    else:
-        setattr(args, 'finetune_type', FINETUNE_TYPES['end_to_end'])
-
-    return args
+    return parser.parse_args()
 
 
 def main(args):
     """Main function."""
 
-    torch.backends.cudnn.benchmark = not args.disable_benchmark
-    BACKBONE_CONFIGS, Config, Backbone, Classifier = AVAILABLE_MODELS[args.backbone_type]
-
-    # 1. Configurations
+    # 0. Main configurations
+    BACKBONE_CONFIGS, Config, Backbone = AVAILABLE_MODELS[args.backbone_type]
+    Classifier = CLASSIFIER_TYPES['linear']
     config = Config(args)
     config.save()
 
-    # 2. Logging
+    np.random.seed(config.seed)
+    torch.manual_seed(config.seed)  # For reproducibility
+    torch.backends.cudnn.benchmark = True
+
     logfile = os.path.join(config.checkpoint_dir, 'main.log')
     logger = get_logger(stream=False, logfile=logfile)
 
-    # 3-1. Backbone
-    backbone = Backbone(BACKBONE_CONFIGS[config.backbone_config], config.in_channels)
+    in_channels = IN_CHANNELS[config.data]
+    num_classes = NUM_CLASSES[config.data]
 
-    # 3-2. Load pretrained weights if pretext task is specified
+    # 1. Dataset
+    if config.data == 'wm811k':
+        train_transform = get_transform(config.data, size=config.input_size, mode=config.augmentation)
+        test_transform  = get_transform(config.data, size=config.input_size, mode='test')
+        train_set = WM811K(
+            './data/wm811k/labeled/train/',
+            transform=train_transform,
+            proportion=config.label_proportion,
+            seed=config.seed
+        )
+        valid_set = WM811K('./data/wm811k/labeled/valid/', transform=test_transform)
+        test_set  = WM811K('./data/wm811k/labeled/test/', transform=test_transform)
+
+    elif config.data == 'cifar10':
+        input_transform = get_transform(config.data, size=config.input_size, mode='test')
+        train_set = CustomCIFAR10('./data/cifar10/', train=True, transform=input_transform, proportion=config.label_proportion)
+        valid_set = CustomCIFAR10('./data/cifar10/', train=False, transform=input_transform)
+        test_set  = valid_set
+
+    elif config.data == 'stl10':
+        raise NotImplementedError
+
+    elif config.data == 'imagenet':
+        raise NotImplementedError
+
+    else:
+        raise KeyError
+
+    steps_per_epoch = len(train_set) // config.batch_size + 1
+    logger.info(f"Data type: {config.data}")
+    logger.info(f"Train : Valid : Test = {len(train_set):,} : {len(valid_set):,} : {len(test_set):,}")
+    logger.info(f"Training steps per epoch: {steps_per_epoch:,}")
+    logger.info(f"Total number of training iterations: {steps_per_epoch * config.epochs:,}")
+
+    # 2. Model
+    backbone = Backbone(BACKBONE_CONFIGS[config.backbone_config], in_channels)
+    classifier = Classifier(
+        in_channels=backbone.out_channels,
+        num_classes=num_classes,
+        dropout=config.dropout,
+    )
+
+    # Load pretrained weights if pretext task is specified
     if config.pretext is not None:
         pretrained_model_file, pretrained_config = \
-            config.find_pretrained_model(root=config.root, model_type=config.model_type)  # 'best_model.pt' or 'last_model.pt'
+            config.find_pretrained_model(root=config.root)
         if config.pretext == 'denoising':
             backbone.load_weights_from_checkpoint(path=pretrained_model_file, key='encoder')
         elif config.pretext == 'inpainting':
@@ -210,86 +258,60 @@ def main(args):
             backbone.load_weights_from_checkpoint(path=pretrained_model_file, key='backbone')
         elif config.pretext == 'simclr':
             backbone.load_weights_from_checkpoint(path=pretrained_model_file, key='backbone')
+        elif config.pretext == 'semiclr':
+            backbone.load_weights_from_checkpoint(path=pretrained_model_file, key='backbone')
+        elif config.pretext == 'attnclr':
+            backbone.load_weights_from_checkpoint(path=pretrained_model_file, key='backbone')
         else:
             raise NotImplementedError
     logger.info(f"Pretrained model: {config.pretext}")
 
-    # 3-3. Optionally freeze backbone layers
-    if config.finetune_type == 1:
-        freezed_layer_names = backbone.freeze_weights(to_freeze=config.freeze)
-        for l in freezed_layer_names:
-            logger.info(f"'{l}' freezed.")
-
-    # 4. Classifier
-    classifier = Classifier(
-        in_channels=backbone.output_shape[0],
-        num_classes=NUM_CLASSES,
-        dropout=config.dropout)
-
-    # 5. Set learning rates
-    params = [{'params': classifier.parameters(), 'lr': config.learning_rate}]
-    if config.finetune_type == 2:
-        for name, block in backbone.layers.named_children():
-            params += [
-                {
-                    'params': block.parameters(),
-                    'lr': config.blockwise_learning_rates.get(name, config.learning_rate)
-                }
-            ]
-    else:
-        params += [{'params': backbone.parameters(), 'lr': config.learning_rate}]
-    logger.info(f"Finetune type: {config.finetune_type}")
+    # Optionally freeze backbone layers
+    if config.freeze:
+        _ = backbone.freeze_weights(to_freeze=['all'])
+        logger.info("Freezed weights for CNN backbone.")
     logger.info(f"Trainable parameters ({backbone.__class__.__name__}): {backbone.num_parameters:,}")
     logger.info(f"Trainable parameters ({classifier.__class__.__name__}): {classifier.num_parameters:,}")
 
-    # 6. Set optimizer and learning rate scheduler
+    # 3. Optimization (TODO: add LARS)
+    params = [
+        {'params': backbone.parameters(), 'lr': config.learning_rate},
+        {'params': classifier.parameters(), 'lr': config.learning_rate},
+    ]
     optimizer = get_optimizer(
-        params=params, name=config.optimizer,
-        lr=config.learning_rate, weight_decay=config.weight_decay, **config.optimizer_kwargs
-        )
+        params=params,
+        name=config.optimizer,
+        lr=config.learning_rate,
+        weight_decay=config.weight_decay
+    )
     scheduler = get_scheduler(
-        optimizer=optimizer, name=config.scheduler,
-        epochs=config.epochs, **config.scheduler_kwargs
-        )
+        optimizer=optimizer,
+        name=config.scheduler,
+        epochs=config.epochs,
+        milestone=config.milestone,
+        warmup_steps=config.warmup_steps
+    )
 
-    # 7. Configure input image transforms and load datasets
-    transforms = BasicTransform.get(size=(config.input_size, config.input_size))
-    train_set = LabeledWM811kFolder('./data/images/labeled/train/', transform=transforms, proportion=config.labeled)
-    valid_set = LabeledWM811kFolder('./data/images/labeled/valid/', transform=transforms)
-    test_set = LabeledWM811kFolder('./data/images/labeled/test/', transform=transforms)
-
-    steps_per_epoch = len(train_set) // config.batch_size + 1
-    logger.info(f"Train : Valid : Test = {len(train_set):,} : {len(valid_set):,} : {len(test_set):,}")
-    logger.info(f"Training steps per epoch: {steps_per_epoch:,}")
-    logger.info(f"Total number of training iterations: {steps_per_epoch * config.epochs:,}")
-
-    # 8. Configure experiment (classification)
-    experiment_kws = {
+    # 4. Experiment (classification)
+    experiment_kwargs = {
         'backbone': backbone,
         'classifier': classifier,
         'optimizer': optimizer,
         'scheduler': scheduler,
-        'loss_function': LabelSmoothingLoss(
-            num_classes=NUM_CLASSES,
-            smoothing=config.smoothing,
-            reduction='mean',
-            class_weights=train_set.class_weights if config.class_weights else None,
-        ),
+        'loss_function': LabelSmoothingLoss(num_classes, smoothing=config.smoothing),
         'checkpoint_dir': config.checkpoint_dir,
         'write_summary': config.write_summary,
         'metrics': {
-            'accuracy': MultiAccuracy(num_classes=NUM_CLASSES),
-            'f1': MultiF1Score(num_classes=NUM_CLASSES, average='macro'),
+            'accuracy': MultiAccuracy(num_classes=num_classes),
+            'f1': MultiF1Score(num_classes=num_classes, average='macro'),
+            'auprc': MultiAUPRC(num_classes=num_classes),
         },
     }
-    experiment = Classification(**experiment_kws)
-    logger.info(f"Optimizer: {experiment.optimizer.__class__.__name__}")
-    logger.info(f"Scheduler: {experiment.scheduler.__class__.__name__}")
-    logger.info(f"Loss: {experiment.loss_function.__class__.__name__}")
-    logger.info(f"Checkpoint directory: {experiment.checkpoint_dir}")
+    experiment = Classification(**experiment_kwargs)
+    logger.info(f"Saving model checkpoints to: {experiment.checkpoint_dir}")
 
-    # 9. Run experiment (classification)
-    run_kws = {
+    # 9. RUN (classification)
+    run_kwargs = {
         'train_set': train_set,
         'valid_set': valid_set,
         'test_set': test_set,
@@ -299,17 +321,12 @@ def main(args):
         'device': config.device,
         'logger': logger,
         'eval_metric': config.eval_metric,
+        'balance': config.balance,
     }
+    logger.info(f"Epochs: {run_kwargs['epochs']}, Batch size: {run_kwargs['batch_size']}")
+    logger.info(f"Workers: {run_kwargs['num_workers']}, Device: {run_kwargs['device']}")
 
-    if config.class_weights:
-        from datasets.wafer import WM811K_LABELS
-        idx2label = {i: l for l, i in WM811K_LABELS.items()}
-        for l, i in WM811K_LABELS.items():
-            logger.info(f"Class weights - {l:>10},({i}): {train_set.class_weights[i]}")
-    logger.info(f"Epochs: {run_kws['epochs']}, Batch size: {run_kws['batch_size']}")
-    logger.info(f"Workers: {run_kws['num_workers']}, Device: {run_kws['device']}")
-
-    experiment.run(**run_kws)
+    experiment.run(**run_kwargs)
     logger.handlers.clear()
 
 

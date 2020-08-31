@@ -2,26 +2,34 @@
 
 import os
 import sys
-import glob
 import argparse
 
 import torch
 
-from datasets.wafer import UnlabeledWM811kFolderForPIRL
-from datasets.transforms import BasicTransform, RotationTransform
-from models.config import PIRLConfig, VGG_BACKBONE_CONFIGS, RESNET_BACKBONE_CONFIGS
-from models.vgg.backbone import VGGBackbone
-from models.resnet.backbone import ResNetBackbone
+from datasets.wafer import WM811KForPIRL
+from datasets.transforms import get_transform
+
+from models.config import PIRLConfig
+from models.config import ALEXNET_BACKBONE_CONFIGS
+from models.config import VGGNET_BACKBONE_CONFIGS
+from models.config import RESNET_BACKBONE_CONFIGS
+from models.alexnet import AlexNetBackbone
+from models.vggnet import VggNetBackbone
+from models.resnet import ResNetBackbone
 from models.head import GAPProjector, NonlinearProjector
+
 from tasks.pirl import PIRL, MemoryBank
-from tasks.denoising import MaskedBernoulliNoise
-from utils.loss import NCELoss
-from utils.optimization import get_optimizer, get_scheduler
+
+from utils.loss import PIRLLoss
+from utils.metrics import TopKAccuracy
 from utils.logging import get_logger
+from utils.optimization import get_optimizer, get_scheduler
+
 
 
 AVAILABLE_MODELS = {
-    'vgg': (VGG_BACKBONE_CONFIGS, PIRLConfig, VGGBackbone),
+    'alexnet': (ALEXNET_BACKBONE_CONFIGS, PIRLConfig, AlexNetBackbone),
+    'vggnet': (VGGNET_BACKBONE_CONFIGS, PIRLConfig, VggNetBackbone),
     'resnet': (RESNET_BACKBONE_CONFIGS, PIRLConfig, ResNetBackbone),
 }
 
@@ -31,170 +39,156 @@ PROJECTOR_TYPES = {
 }
 
 
+IN_CHANNELS = {'wm811k': 2}
+
+
 def parse_args():
 
-    parser = argparse.ArgumentParser("PIRL pretext task on WM811k.", add_help=True)
+    parser = argparse.ArgumentParser("Pretext Invariant Representation Learning.", add_help=True)
 
     g1 = parser.add_argument_group('General')
-    g1.add_argument('--input_size', type=int, default=112, choices=(56, 112, 224))
-    g1.add_argument('--disable_benchmark', action='store_true')
+    g1.add_argument('--data', type=str, choices=('wm811k', ), required=True)
+    g1.add_argument('--input_size', type=int, choices=(32, 64, 96, 112, 224), required=True)
 
-    g2 = parser.add_argument_group('Backbone')
-    g2.add_argument('--backbone_type', type=str, default='resnet', choices=('vgg', 'resnet'))
-    g2.add_argument('--backbone_config', type=str, default='18.original')
-    g2.add_argument('--in_channels', type=int, default=2, choices=(1, 2))
+    g2 = parser.add_argument_group('CNN Backbone')
+    g2.add_argument('--backbone_type', type=str, default='resnet', choices=('alexnet', 'vggnet', 'resnet'), required=True)
+    g2.add_argument('--backbone_config', type=str, default='18.original', required=True)
 
     g3 = parser.add_argument_group('PIRL')
-    g3.add_argument('--projector_type', type=str, default='linear', choices=('linear', 'mlp'))
-    g3.add_argument('--projector_size', type=int, default=128)
-    g3.add_argument('--num_negatives', type=int, default=1000)
-    g3.add_argument('--loss_weight', type=float, default=0.9)
-    g3.add_argument('--temperature', type=float, default=0.07)
-    g3.add_argument('--noise', type=float, default=None)
-    g3.add_argument('--rotate', action='store_true')
+    g3.add_argument('--projector_type', type=str, default='linear', choices=('linear', 'mlp'), required=True)
+    g3.add_argument('--projector_size', type=int, default=128, help='Dimension of projection head.')
+    g3.add_argument('--temperature', type=float, default=0.07, help='Logit scaling factor for contrastive learning.')
+    g3.add_argument('--num_negatives', type=int, default=5000, help='Number of negative examples for contrastive learning.')
+    g3.add_argument('--loss_weight', type=float, default=0.5, help='Weighting factor of loss function, [0, 1].')
+    g3.add_argument('--augmentation', type=str, choices=('rotate+crop', 'rotate', 'crop', 'cutout', 'shift', 'noise'), required=True)
 
-    g4 = parser.add_argument_group('Training')
-    g4.add_argument('--epochs', type=int, default=100)
-    g4.add_argument('--batch_size', type=int, default=1024)
+    g4 = parser.add_argument_group('Model Training')
+    g4.add_argument('--epochs', type=int, default=150)
+    g4.add_argument('--batch_size', type=int, default=512)
     g4.add_argument('--num_workers', type=int, default=0)
-    g4.add_argument('--device', type=str, default='cuda:1', choices=('cuda', 'cuda:0', 'cuda:1', 'cuda:2', 'cuda:3', 'cpu'))
+    g4.add_argument('--device', type=str, default='cuda:0', choices=('cuda', 'cuda:0', 'cuda:1', 'cuda:2', 'cuda:3', 'cpu'))
 
-    g5 = parser.add_argument_group('Regularization')
+    g5 = parser.add_argument_group('Regularization')  # pylint: disable=unused-variable
 
     g6 = parser.add_argument_group('Optimizer')
-    g6.add_argument('--optimizer', type=str, default='adamw', choices=('sgd', 'adamw'))
-    g6.add_argument('--learning_rate', type=float, default=0.0001)
-    g6.add_argument('--weight_decay', type=float, default=0.0005)
-    g6.add_argument('--optimizer_kwargs', nargs='+', default=[])
+    g6.add_argument('--optimizer', type=str, default='sgd', choices=('sgd', 'adamw', 'lars'))
+    g6.add_argument('--learning_rate', type=float, default=0.01)
+    g6.add_argument('--weight_decay', type=float, default=0.001)
+    g6.add_argument('--momentum', type=float, default=0.9, help='only for SGD.')
 
     g7 = parser.add_argument_group('Scheduler')
-    g7.add_argument('--scheduler', type=str, default=None, choices=('step', 'plateau', 'cosine', 'restart'))
-    g7.add_argument('--scheduler_kwargs', nargs='+', default=[])
+    g7.add_argument('--scheduler', type=str, default='cosine', choices=('step', 'cosine', 'restart', 'none'))
+    g7.add_argument('--milestone', type=int, default=None, help='For step decay.')
+    g7.add_argument('--warmup_steps', type=int, default=5, help='For linear warmups.')
+    g7.add_argument('--cycles', type=int, default=1, help='For hard restarts.')
 
     g8 = parser.add_argument_group('Logging')
     g8.add_argument('--checkpoint_root', type=str, default='./checkpoints/')
-    g8.add_argument('--write_summary', action='store_true')
-    g8.add_argument('--save_every', action='store_true')
+    g8.add_argument('--write_summary', action='store_true', help='write summaries with TensorBoard.')
+    g8.add_argument('--save_every', type=int, default=None, help='save model checkpoint every `save_every` epochs.')
 
     g9 = parser.add_argument_group('Resuming training from a checkpoint')
     g9.add_argument('--resume_from_checkpoint', type=str, default=None)
 
-    args = parser.parse_args()
-
-    def get_kwargs(l: list):
-        out = {}
-        for kv in l:
-            k, v = kv.split('=')
-            if '.' in v:
-                v = float(v)
-            else:
-                try:
-                    v = int(v)
-                except ValueError:
-                    v = str(v)
-            out[k] = v
-
-        return out
-
-    opt_kwargs = get_kwargs(args.optimizer_kwargs)
-    setattr(args, 'optimizer_kwargs', opt_kwargs)
-
-    sch_kwargs = get_kwargs(args.scheduler_kwargs)
-    setattr(args, 'scheduler_kwargs', sch_kwargs)
-
-    return args
+    return parser.parse_args()
 
 
 def main(args):
     """Main function."""
 
-    torch.backends.cudnn.benchmark = not args.disable_benchmark
+    # 1. Configurations
+    torch.backends.cudnn.benchmark = True
     BACKBONE_CONFIGS, Config, Backbone = AVAILABLE_MODELS[args.backbone_type]
     Projector = PROJECTOR_TYPES[args.projector_type]
 
-    # 1. Configurations
     config = Config(args)
     config.save()
 
-    # 2. Logger
     logfile = os.path.join(config.checkpoint_dir, 'main.log')
     logger = get_logger(stream=False, logfile=logfile)
 
-    # 3. Backbone
-    backbone = Backbone(BACKBONE_CONFIGS[config.backbone_config], config.in_channels)
+    # 2. Data
+    if config.data == 'wm811k':
+        data_transforms = {
+            'transform': get_transform(
+                data=config.data,
+                size=config.input_size,
+                mode='test'
+                ),
+            'positive_transform': get_transform(
+                data=config.data,
+                size=config.input_size,
+                mode=config.augmentation,
+                ),
+        }
+        train_set = torch.utils.data.ConcatDataset(
+            [
+                WM811KForPIRL('./data/wm811k/unlabeled/train/', **data_transforms),
+                WM811KForPIRL('./data/wm811k/labeled/train/', **data_transforms),
+            ]
+        )
+        valid_set = torch.utils.data.ConcatDataset(
+            [
+                WM811KForPIRL('./data/wm811k/unlabeled/valid/', **data_transforms),
+                WM811KForPIRL('./data/wm811k/labeled/valid/', **data_transforms),
+            ]
+        )
+        test_set = torch.utils.data.ConcatDataset(
+            [
+                WM811KForPIRL('./data/wm811k/unlabeled/test/', **data_transforms),
+                WM811KForPIRL('./data/wm811k/labeled/test/', **data_transforms),
+            ]
+        )
+    else:
+        raise ValueError(
+            f"PIRL only supports 'wm811k' data. Received '{config.data}'."
+        )
 
-    # 4. Projector
-    projector = Projector(
-        in_channels=backbone.out_channels,
-        num_features=config.projector_size,
-    )
-    logger.info(f"Trainable parameters ({backbone.__class__.__name__}): {backbone.num_parameters:,}")
-    logger.info(f"Trainable parameters ({projector.__class__.__name__}): {projector.num_parameters:,}")
-    logger.info(f"Projector size: {config.projector_size}")
+    # 3. Model
+    backbone = Backbone(BACKBONE_CONFIGS[config.backbone_config], in_channels=IN_CHANNELS[config.data])
+    projector = Projector(backbone.out_channels, config.projector_size)
 
-    # 6. Set optimizer and learning rate scheduler
+    # 4. Optimization
     params = [{'params': backbone.parameters()}, {'params': projector.parameters()}]
     optimizer = get_optimizer(
         params=params,
         name=config.optimizer,
         lr=config.learning_rate,
         weight_decay=config.weight_decay,
-        **config.optimizer_kwargs
+        momentum=config.momentum
     )
     scheduler = get_scheduler(
         optimizer=optimizer,
         name=config.scheduler,
         epochs=config.epochs,
-        **config.scheduler_kwargs
+        milestone=config.milestone,
+        warmup_steps=config.warmup_steps
     )
 
-    # 7. Configure input image transforms and load datasets
-    data_kws = {'transform': BasicTransform.get(size=(config.input_size, config.input_size))}
-    if config.rotate:
-        data_kws['positive_transform'] = RotationTransform.get(size=(config.input_size, config.input_size))
-    else:
-        data_kws['positive_transform'] = BasicTransform.get(size=(config.input_size, config.input_size))
-
-    train_set = UnlabeledWM811kFolderForPIRL('./data/images/unlabeled/train/', **data_kws)
-    valid_set = UnlabeledWM811kFolderForPIRL('./data/images/unlabeled/valid/', **data_kws)
-    test_set  = UnlabeledWM811kFolderForPIRL('./data/images/unlabeled/test/', **data_kws)
-
-    steps_per_epoch = len(train_set) // config.batch_size + 1
-    logger.info(f"Train : Valid : Test = {len(train_set):,} : {len(valid_set):,} : {len(test_set):,}")
-    logger.info(f"Training steps per epoch: {steps_per_epoch:,}")
-    logger.info(f"Total number of training iterations: {steps_per_epoch * config.epochs:,}")
-
-    # 8. Configure experiment (PIRL)
-    experiment_kws = {
+    # 5. Experiment (PIRL)
+    experiment_kwargs = {
         'backbone': backbone,
         'projector': projector,
         'memory': MemoryBank(
             size=(len(train_set), config.projector_size),
             device=config.device
             ),
-        'noise_function': MaskedBernoulliNoise(config.noise) if config.noise > 0 else None,
         'optimizer': optimizer,
         'scheduler': scheduler,
-        'loss_function': NCELoss(temperature=config.temperature),
+        'loss_function': PIRLLoss(temperature=config.temperature),
         'loss_weight': config.loss_weight,
         'num_negatives': config.num_negatives,
-        'metrics': None,
+        'metrics': {
+            'top@1': TopKAccuracy(num_classes=1 + config.num_negatives, k=1),
+            'top@5': TopKAccuracy(num_classes=1 + config.num_negatives, k=5)
+            },
         'checkpoint_dir': config.checkpoint_dir,
         'write_summary': config.write_summary,
     }
-    experiment = PIRL(**experiment_kws)
-    logger.info(f"Optimizer: {experiment.optimizer.__class__.__name__}")
-    logger.info(f"Scheduler: {experiment.scheduler.__class__.__name__}")
-    logger.info(f"Loss: {experiment.loss_function.__class__.__name__}")
-    logger.info(f"Negative samples: {experiment.num_negatives:,}")
-    logger.info(f"Loss weight: {experiment.loss_weight:.2f}")
-    logger.info(f"Temperature: {experiment.loss_function.temperature:.2f}")
-    logger.info(f"Noise: {config.noise:.2f}")
-    logger.info(f"Rotate: {config.rotate}")
-    logger.info(f"Checkpoint directory: {experiment.checkpoint_dir}")
+    experiment = PIRL(**experiment_kwargs)
 
-    # 9-1. Experiment (PIRL)
-    run_kws = {
+    # 6. Run (train, evaluate, and test model)
+    run_kwargs = {
         'train_set': train_set,
         'valid_set': valid_set,
         'test_set': test_set,
@@ -205,10 +199,22 @@ def main(args):
         'logger': logger,
         'save_every': config.save_every,
     }
-    logger.info(f"Epochs: {run_kws['epochs']}, Batch size: {run_kws['batch_size']}")
-    logger.info(f"Workers: {run_kws['num_workers']}, Device: {run_kws['device']}")
 
-    # 9-2. Optionally load from checkpoint
+    logger.info(f"Data: {config.data}")
+    logger.info(f"Augmentation: {config.augmentation}")
+    logger.info(f"Train : Valid : Test = {len(train_set):,} : {len(valid_set):,} : {len(test_set):,}")
+    logger.info(f"Trainable parameters ({backbone.__class__.__name__}): {backbone.num_parameters:,}")
+    logger.info(f"Trainable parameters ({projector.__class__.__name__}): {projector.num_parameters:,}")
+    logger.info(f"Projector type: {config.projector_type}")
+    logger.info(f"Projector dimension: {config.projector_size}")
+    logger.info(f"Saving model checkpoints to: {experiment.checkpoint_dir}")
+    logger.info(f"Epochs: {run_kwargs['epochs']}, Batch size: {run_kwargs['batch_size']}")
+    logger.info(f"Workers: {run_kwargs['num_workers']}, Device: {run_kwargs['device']}")
+
+    steps_per_epoch = len(train_set) // config.batch_size + 1
+    logger.info(f"Training steps per epoch: {steps_per_epoch:,}")
+    logger.info(f"Total number of training iterations: {steps_per_epoch * config.epochs:,}")
+
     if config.resume_from_checkpoint is not None:
         logger.info(f"Resuming from a checkpoint: {config.resume_from_checkpoint}")
         model_ckpt = os.path.join(config.resume_from_checkpoint, 'best_model.pt')
@@ -222,7 +228,7 @@ def main(args):
                 if isinstance(v, torch.Tensor):
                     state[k] = v.to(config.device)
 
-    experiment.run(**run_kws)
+    experiment.run(**run_kwargs)
     logger.handlers.clear()
 
 

@@ -10,46 +10,44 @@ from datasets.wafer import WM811KForSimCLR
 from datasets.cifar import CIFAR10ForSimCLR
 from datasets.transforms import get_transform
 
-from models.config import SimCLRConfig, RESNET_BACKBONE_CONFIGS
+from models.config import AttnCLRConfig, RESNET_BACKBONE_CONFIGS
 from models.resnet import ResNetBackbone
-from models.head import GAPProjector, NonlinearProjector
+from models.head import GAPProjector, AttentionProjector
 
-from tasks.simclr import SimCLR
+from tasks.attnclr import AttnCLR
 
-from utils.loss import SimCLRLoss
+from utils.loss import AttnCLRLoss
 from utils.logging import get_logger
 from utils.optimization import get_optimizer, get_scheduler
 
 
-
 AVAILABLE_MODELS = {
-    'alex': (None, None, None),
-    'vgg': (None, None, None),
-    'resnet': (RESNET_BACKBONE_CONFIGS, SimCLRConfig, ResNetBackbone),
+    'resnet': (RESNET_BACKBONE_CONFIGS, AttnCLRConfig, ResNetBackbone),
 }
 
 PROJECTOR_TYPES = {
     'linear': GAPProjector,
-    'mlp': NonlinearProjector
+    'mlp': AttentionProjector,
 }
 
 
 def parse_args():
 
-    parser = argparse.ArgumentParser("Simple Contrastive Learning Framework.", add_help=True)
+    parser = argparse.ArgumentParser("Attention-based Contrastive Learning Framework.", add_help=True)
 
     g1 = parser.add_argument_group('Data')
-    g1.add_argument('--data', type=str, choices=('wm811k', 'cifar10', 'stl10', 'imagenet'), required=True)
-    g1.add_argument('--input_size', type=int, choices=(32, 64, 96, 224), required=True)
+    g1.add_argument('--data', type=str, default='wm811k', choices=('wm811k', 'cifar10', 'stl10', 'imagenet'), required=True)
+    g1.add_argument('--input_size', type=int, default=56, choices=(32, 64, 96, 224), required=True)
 
     g2 = parser.add_argument_group('CNN Backbone')
     g2.add_argument('--backbone_type', type=str, default='resnet', choices=('resnet'), required=True)
     g2.add_argument('--backbone_config', type=str, default='18.original', required=True)
 
-    g3 = parser.add_argument_group('SimCLR')
+    g3 = parser.add_argument_group('AttnCLR')
     g3.add_argument('--projector_type', type=str, default='mlp', choices=('linear', 'mlp'), required=True)
     g3.add_argument('--projector_size', type=int, default=128)
     g3.add_argument('--temperature', type=float, default=0.07)
+    # g3.add_argument('--gamma', type=float, default=1.0)
 
     g4 = parser.add_argument_group('Model Training')
     g4.add_argument('--epochs', type=int, default=1000)
@@ -64,6 +62,7 @@ def parse_args():
     g6.add_argument('--learning_rate', type=float, default=0.01)
     g6.add_argument('--weight_decay', type=float, default=0.001)
     g6.add_argument('--momentum', type=float, default=0.9, help='only for SGD.')
+    g6.add_argument('--trust_coef', type=float, default=1.0, help='only for LARS.')
 
     g7 = parser.add_argument_group('Scheduler')
     g7.add_argument('--scheduler', type=str, default=None, choices=('step', 'cosine', 'restart', 'none'))
@@ -74,10 +73,8 @@ def parse_args():
     g8 = parser.add_argument_group('Logging')
     g8.add_argument('--checkpoint_root', type=str, default='./checkpoints/')
     g8.add_argument('--write_summary', action='store_true', help='write summaries with TensorBoard.')
+    g8.add_argument('--write_histogram', action='store_true', help='write attention distribution histograms.')
     g8.add_argument('--save_every', action='store_true', help='save every checkpoint w/ improvements.')
-
-    g9 = parser.add_argument_group('Resuming training from a checkpoint')
-    g9.add_argument('--resume_from_checkpoint', type=str, default=None)
 
     return parser.parse_args()
 
@@ -97,7 +94,7 @@ def main(args):
     logger  = get_logger(stream=False, logfile=logfile)
 
     # 1. DATA
-    input_transform = get_transform(config.data, size=config.input_size, mode='train')
+    input_transform = get_transform(config.data, size=config.input_size, mode='pretrain')
     if config.data == 'wm811k':
         in_channels = 2
         train_set = torch.utils.data.ConcatDataset(
@@ -128,7 +125,7 @@ def main(args):
     elif config.data == 'imagenet':
         raise NotImplementedError
     else:
-        raise ValueError
+        raise NotImplementedError
     logger.info(f"Data type: {config.data}")
     logger.info(f"Train : Valid : Test = {len(train_set):,} : {len(valid_set):,} : {len(test_set):,}")
     steps_per_epoch = len(train_set) // config.batch_size + 1
@@ -140,16 +137,17 @@ def main(args):
     projector = Projector(backbone.out_channels, config.projector_size)
     logger.info(f"Trainable parameters ({backbone.__class__.__name__}): {backbone.num_parameters:,}")
     logger.info(f"Trainable parameters ({projector.__class__.__name__}): {projector.num_parameters:,}")
-    logger.info(f"Embedding dimension: {config.projector_size}")
+    logger.info(f"Projector size: {config.projector_size}")
 
-    # 3. OPTIMIZATION (TODO: add LARS optimizer)
+    # 3. OPTIMIZATION
     params = [{'params': backbone.parameters()}, {'params': projector.parameters()}]
     optimizer = get_optimizer(
         params=params,
         name=config.optimizer,
         lr=config.learning_rate,
         weight_decay=config.weight_decay,
-        momentum=config.momentum
+        momentum=config.momentum,
+        trust_coef=config.trust_coef,
     )
     scheduler = get_scheduler(
         optimizer=optimizer,
@@ -159,21 +157,22 @@ def main(args):
         warmup_steps=config.warmup_steps
     )
 
-    # 4. EXPERIMENT (SimCLR)
+    # 4. EXPERIMENT (AttnCLR)
     experiment_kwargs = {
         'backbone': backbone,
         'projector': projector,
         'optimizer': optimizer,
         'scheduler': scheduler,
-        'loss_function': SimCLRLoss(temperature=config.temperature),
+        'loss_function': AttnCLRLoss(temperature=config.temperature),
         'metrics': None,
         'checkpoint_dir': config.checkpoint_dir,
         'write_summary': config.write_summary,
+        'write_histogram': config.write_histogram,
     }
-    experiment = SimCLR(**experiment_kwargs)
+    experiment = AttnCLR(**experiment_kwargs)
     logger.info(f"Saving model checkpoints to: {experiment.checkpoint_dir}")
 
-    # 5. RUN (SimCLR)
+    # 5. RUN (AttnCLR)
     run_kwargs = {
         'train_set': train_set,
         'valid_set': valid_set,
@@ -187,17 +186,6 @@ def main(args):
     }
     logger.info(f"Epochs: {run_kwargs['epochs']}, Batch size: {run_kwargs['batch_size']}")
     logger.info(f"Workers: {run_kwargs['num_workers']}, Device: {run_kwargs['device']}")
-
-    if config.resume_from_checkpoint is not None:
-        logger.info(f"Resuming from checkpoint: {config.resume_from_checkpoint}")
-        model_ckpt = os.path.join(config.resume_from_checkpoint, 'best_model.pt')
-        experiment.load_model_from_checkpoint(model_ckpt)
-
-        # Assign optimizer variables to appropriate device
-        for state in experiment.optimizer.state.values():
-            for k, v in state.items():
-                if isinstance(v, torch.Tensor):
-                    state[k] = v.to(config.device)
 
     experiment.run(**run_kwargs)
     logger.handlers.clear()
