@@ -60,7 +60,7 @@ def parse_args():
     parser = argparse.ArgumentParser("Downstream classification, supports both linear evaluation & fine-tuning.", add_help=True)
 
     g0 = parser.add_argument_group('Randomness')
-    g0.add_argument('--seed', type=int, required=True)
+    g0.add_argument('--seed', type=int, default=0, help='Random seed for repeated trials of experiments.')
 
     g1 = parser.add_argument_group('Data')
     g1.add_argument('--data', type=str, choices=('wm811k', 'cifar10', 'stl10', 'imagenet'), required=True)
@@ -87,9 +87,7 @@ def parse_args():
     g4.add_argument('--batch_size', type=int, default=256, help='batch size used during training.')
     g4.add_argument('--num_workers', type=int, default=0, help='number of cpu threads for data loading.')
     g4.add_argument('--device', type=str, default='cuda', choices=['cuda', 'cuda:0', 'cuda:1', 'cuda:2', 'cuda:3', 'cpu'])
-    g4.add_argument('--augmentation', type=str, default='rotate', 
-                    choices=['crop', 'rotate', 'cutout', 'shift', 'noise', 'test', 'crop+rotate', 'shift+crop+rotate', 'shift+crop+rotate+cutout+noise']
-    )
+    g4.add_argument('--augmentation', type=str, default='test', choices=['crop', 'cutout', 'noise', 'rotate', 'shift', 'test'])
 
     g5 = parser.add_argument_group('Regularization')
     g5.add_argument('--dropout', type=float, default=0.0, help='dropout rate in fully-connected layers.')
