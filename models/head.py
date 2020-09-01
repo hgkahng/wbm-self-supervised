@@ -9,7 +9,7 @@ import torch.nn as nn
 
 from entmax import sparsemax
 
-from models.base import FlattenHeadBase, PoolingHeadBase
+from models.base import FlattenHeadBase, GAPHeadBase
 from layers.core import Flatten
 from utils.initialization import initialize_weights
 
@@ -18,7 +18,7 @@ class LinearClassifier(FlattenHeadBase):
     def __init__(self, input_shape: tuple, num_classes: int, dropout: float = 0.0):
         super(LinearClassifier, self).__init__(input_shape, num_classes)
 
-        self.input_shape = input_shape
+        self.input_shape = input_shape  # (C, H, W)
         self.num_classes = num_classes
         self.dropout = dropout
         self.layers = self.make_layers(
@@ -55,7 +55,7 @@ class LinearClassifier(FlattenHeadBase):
         return sum(p.numel() for p in self.layers.parameters() if p.requires_grad)
 
 
-class GAPClassifier(PoolingHeadBase):
+class GAPClassifier(GAPHeadBase):
     def __init__(self, in_channels: int, num_classes: int, dropout: float = 0.0):
         """
         Arguments:
@@ -116,7 +116,7 @@ class GAPProjector(GAPClassifier):
     def num_features(self):
         return self.num_classes
 
-class NonlinearProjector(PoolingHeadBase):
+class NonlinearProjector(GAPHeadBase):
     def __init__(self, in_channels: int, num_features: int):
         """
         Arguments:
@@ -156,7 +156,7 @@ class NonlinearProjector(PoolingHeadBase):
         return sum(p.numel() for p in self.layers.parameters() if p.requires_grad)
 
 
-class AttentionProjector(PoolingHeadBase):
+class AttentionProjector(GAPHeadBase):
     def __init__(self, in_channels: int, num_features: int, dropout: float = 0.1, temperature: float = None):
         super(AttentionProjector, self).__init__(in_channels, num_features)
 
@@ -230,7 +230,7 @@ class AttentionProjector(PoolingHeadBase):
                 pass
 
 
-class PatchGAPClassifier(PoolingHeadBase):
+class PatchGAPClassifier(GAPHeadBase):
     def __init__(self, num_patches: int, in_channels: int, num_classes: int, dropout: float = 0.0):
 
         super(PatchGAPClassifier, self).__init__(in_channels, num_classes)

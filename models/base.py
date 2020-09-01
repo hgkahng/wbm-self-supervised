@@ -94,9 +94,9 @@ class FlattenHeadBase(HeadBase):
         assert len(input_shape) == 3, "(C, H, W)"
 
 
-class PoolingHeadBase(HeadBase):
+class GAPHeadBase(HeadBase):
     def __init__(self, in_channels: int, output_size: int):
-        super(PoolingHeadBase, self).__init__(output_size)
+        super(GAPHeadBase, self).__init__(output_size)
         assert isinstance(in_channels, int), "Number of output feature maps of backbone."
 
 
