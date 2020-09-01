@@ -55,16 +55,16 @@ def parse_args():
     g2.add_argument('--backbone_config', type=str, default='18.original', required=True)
 
     g3 = parser.add_argument_group('PIRL')
-    g3.add_argument('--projector_type', type=str, default='linear', choices=('linear', 'mlp'), required=True)
+    g3.add_argument('--projector_type', type=str, default='mlp', choices=('linear', 'mlp'))
     g3.add_argument('--projector_size', type=int, default=128, help='Dimension of projection head.')
     g3.add_argument('--temperature', type=float, default=0.07, help='Logit scaling factor for contrastive learning.')
     g3.add_argument('--num_negatives', type=int, default=5000, help='Number of negative examples for contrastive learning.')
     g3.add_argument('--loss_weight', type=float, default=0.5, help='Weighting factor of loss function, [0, 1].')
-    g3.add_argument('--augmentation', type=str, choices=('rotate+crop', 'rotate', 'crop', 'cutout', 'shift', 'noise'), required=True)
+    g3.add_argument('--augmentation', type=str, choices=('crop', 'cutout', 'noise', 'rotate', 'shift'), required=True)
 
     g4 = parser.add_argument_group('Model Training')
-    g4.add_argument('--epochs', type=int, default=150)
-    g4.add_argument('--batch_size', type=int, default=512)
+    g4.add_argument('--epochs', type=int, default=100)
+    g4.add_argument('--batch_size', type=int, default=256)
     g4.add_argument('--num_workers', type=int, default=0)
     g4.add_argument('--device', type=str, default='cuda:0', choices=('cuda', 'cuda:0', 'cuda:1', 'cuda:2', 'cuda:3', 'cpu'))
 
