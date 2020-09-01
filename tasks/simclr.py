@@ -5,13 +5,11 @@ import json
 import tqdm
 
 import torch
-import torch.nn as nn
-
 from torch.utils.tensorboard import SummaryWriter
 
 from models.base import BackboneBase, HeadBase
 from tasks.base import Task
-from datasets.wafer import get_dataloader
+from datasets.loaders import get_dataloader
 from utils.loss import SimCLRLoss
 from utils.logging import get_tqdm_config
 from utils.logging import make_epoch_description

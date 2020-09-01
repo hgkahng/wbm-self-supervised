@@ -12,7 +12,7 @@ from torch.distributions.categorical import Categorical
 
 from models.base import BackboneBase, HeadBase
 from tasks.base import Task
-from datasets.wafer import get_dataloader
+from datasets.loaders import get_dataloader
 from utils.loss import PIRLLoss
 from utils.logging import get_tqdm_config
 from utils.logging import make_epoch_description
@@ -186,7 +186,7 @@ class PIRL(Task):
                     best_epoch = epoch
                     self.save_checkpoint(self.best_ckpt, epoch=epoch, **epoch_history)
                     self.memory.save(os.path.join(os.path.dirname(self.best_ckpt), 'best_memory.pt'), epoch=epoch)
-                
+
                 # 4-2. Save intermediate models
                 if isinstance(kwargs.get('save_every'), int):
                     if epoch % kwargs.get('save_every') == 0:
@@ -232,7 +232,6 @@ class PIRL(Task):
                 j  = batch['idx']
                 x  = batch['x'].to(device)
                 x_t = batch['x_t'].to(device)
-
                 z = self.predict(x)
                 z_t = self.predict(x_t)
 
@@ -288,10 +287,10 @@ class PIRL(Task):
         with torch.no_grad():
             for _, batch in enumerate(data_loader):
 
-                x, x_t = batch['x'].to(device), batch['x_t'].to(device)
-                j = batch['idx']
-
-                z = self.predict(x)
+                j   = batch['idx']
+                x   = batch['x'].to(device)
+                x_t = batch['x_t'].to(device)
+                z   = self.predict(x)
                 z_t = self.predict(x_t)
 
                 negatives = self.memory.get_negatives(self.num_negatives, exclude=j)

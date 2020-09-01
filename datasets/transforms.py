@@ -2,8 +2,8 @@
 
 import cv2
 import torch
-import albumentations as A
 import numpy as np
+import albumentations as A
 
 from torchvision.transforms import Compose
 from torchvision.transforms import ToTensor, Normalize
@@ -134,6 +134,128 @@ class MaskedMedianBlur(object):
             return out.squeeze(0)   # (1, 1, H, W) -> (1, H, W)
 
 
+class WM811KTransform(object):
+    """Transformations for wafer bin maps from WM-811K."""
+    def __init__(self,
+                 size: tuple = (96, 96),
+                 mode: str = 'test',
+                 **kwargs):
+
+        defaults = dict(
+            size=size,
+            mode=mode,
+        )
+        defaults.update(kwargs)
+        self.defaults = defaults
+
+        if mode == 'crop':
+            transform = self.crop_transform(**defaults)
+        elif mode == 'cutout':
+            transform = self.cutout_transform(**defaults)
+        elif mode == 'noise':
+            transform = self.noise_transform(**defaults)
+        elif mode == 'rotate':
+            transform = self.rotate_transform(**defaults)
+        elif mode == 'shift':
+            transform = self.shift_transform(**defaults)
+        elif mode == 'test':
+            transform = self.test_transform(**defaults)
+        else:
+            raise NotImplementedError
+
+        self.transform = A.Compose(transform)
+
+    def __call__(self, img):
+        return self.transform(image=img)['image']
+
+    def __repr__(self):
+        repr_str = self.__class__.__name__
+        for k, v in self.defaults.items():
+            repr_str += f"\n{k}: {v}"
+        return repr_str
+
+    @staticmethod
+    def crop_transform(size: tuple, scale: tuple = (0.5, 1.0), ratio: tuple = (0.9, 1.1), **kwargs) -> list:  # pylint: disable=unused-argument
+        """
+        Crop-based augmentation, with `albumentations`.
+        Expects a 3D numpy array of shape [H, W, C] as input.
+        """
+        transform = [
+            A.Flip(p=0.5),
+            A.RandomResizedCrop(*size, scale=scale, ratio=ratio, interpolation=cv2.INTER_NEAREST, p=1.0),
+            ToWBM(),
+        ]
+
+        return transform
+
+    @staticmethod
+    def cutout_transform(size: tuple, num_holes: int = 4, cut_ratio: float = 0.2, **kwargs) -> list:  # pylint: disable=unused-argument
+        cut_h = int(size[0] * cut_ratio)
+        cut_w = int(size[1] * cut_ratio)
+        transform = [
+            A.Flip(p=0.5),
+            A.Resize(*size, interpolation=cv2.INTER_NEAREST),
+            A.Cutout(num_holes=num_holes, max_h_size=cut_h, max_w_size=cut_w, fill_value=0, p=0.5),
+            ToWBM()
+        ]
+
+        return transform
+
+    @staticmethod
+    def noise_transform(size: tuple, noise: float = 0.05, **kwargs) -> list:  # pylint: disable=unused-argument
+        if noise <= 0.:
+            raise ValueError("'noise' probability must be larger than zero.")
+        transform = [
+            A.Resize(*size, interpolation=cv2.INTER_NEAREST),
+            ToWBM(),
+            MaskedBernoulliNoise(noise=noise),
+        ]
+
+        return transform
+
+    @staticmethod
+    def rotate_transform(size: tuple, **kwargs) -> list:  # pylint: disable=unused-argument
+        """
+        Rotation-based augmentation, with `albumentations`.
+        Expects a 3D numpy array of shape [H, W, C] as input.
+        """
+        transform = [
+            A.Flip(p=0.5),
+            A.Rotate(limit=180, interpolation=cv2.INTER_NEAREST, border_mode=cv2.BORDER_CONSTANT, p=1.0),
+            A.Resize(*size, interpolation=cv2.INTER_NEAREST),
+            ToWBM(),
+        ]
+
+        return transform
+
+    @staticmethod
+    def shift_transform(size: tuple, shift: float = 0.25, **kwargs) -> list:  # pylint: disable=unused-argument
+        transform = [
+            A.Flip(p=0.5),
+            A.ShiftScaleRotate(
+                shift_limit=shift,
+                scale_limit=0,
+                rotate_limit=0,
+                interpolation=cv2.INTER_NEAREST,
+                border_mode=cv2.BORDER_CONSTANT,
+                value=0,
+                p=1.0
+            ),
+            A.Resize(*size, interpolation=cv2.INTER_NEAREST),
+            ToWBM(),
+        ]
+
+        return transform
+
+    @staticmethod
+    def test_transform(size: tuple, **kwargs) -> list:  # pylint: disable=unused-argument
+        transform = [
+            A.Resize(*size, interpolation=cv2.INTER_NEAREST),
+            ToWBM(),
+        ]
+
+        return transform
+
 class ImageNetTransform(object):
     def __init__(self, size: tuple = (224, 224), mode: str = 'pretrain'):
         raise NotImplementedError
@@ -183,208 +305,6 @@ class CIFAR10Transform(object):
     @property
     def std(self):
         return [0.2023, 0.1994, 0.2010]
-
-
-class WM811KTransform(object):
-    """Transformations for wafer bin maps from WM-811K."""
-    def __init__(self,
-                 size: tuple = (96, 96),
-                 mode: str = 'test',
-                 **kwargs):
-
-        defaults = dict(
-            size=size,
-            mode=mode,
-        )
-        defaults.update(kwargs)
-        self.defaults = defaults
-
-        if mode == 'crop+rotate':
-            transform = self.crop_rotate_transform(**defaults)
-        elif mode == 'shift+crop+rotate':
-            transform = self.shift_crop_rotate_transform(**defaults)
-        elif mode == 'shift+crop+rotate+cutout+noise':
-            transform = self.shift_crop_rotate_cutout_noise_transform(**defaults)
-        elif mode == 'rotate':
-            transform = self.rotate_transform(**defaults)
-        elif mode == 'crop':
-            transform = self.crop_transform(**defaults)
-        elif mode == 'shear':
-            transform = self.shear_transform(**defaults)
-        elif mode == 'shift':
-            transform = self.shift_transform(**defaults)
-        elif mode == 'noise':
-            transform = self.noise_transform(**defaults)
-        elif mode == 'cutout':
-            transform = self.cutout_transform(**defaults)
-        elif mode == 'test':
-            transform = [
-                A.Resize(*size, interpolation=cv2.INTER_NEAREST),
-                ToWBM(),
-            ]
-        else:
-            raise NotImplementedError
-
-        self.transform = A.Compose(transform)
-
-    def __call__(self, img):
-        return self.transform(image=img)['image']
-
-    def __repr__(self):
-        repr_str = self.__class__.__name__
-        for k, v in self.defaults.items():
-            repr_str += f"\n{k}: {v}"
-        return repr_str
-
-    @staticmethod
-    def crop_transform(size: tuple,
-                       scale: tuple = (0.5, 1.0),
-                       ratio: tuple = (0.9, 1.1),
-                       **kwargs):  # pylint: disable=unused-argument
-        """
-        Crop-based augmentation, with `albumentations`.
-        Expects a 3D numpy array of shape [H, W, C] as input.
-        """
-        transform = [
-            A.Flip(p=0.5),
-            A.RandomResizedCrop(*size, scale=scale, ratio=ratio, interpolation=cv2.INTER_NEAREST, p=1.0),
-            ToWBM(),
-        ]
-
-        return transform
-
-    @staticmethod
-    def rotate_transform(size: tuple, **kwargs):  # pylint: disable=unused-argument
-        """
-        Rotation-based augmentation, with `albumentations`.
-        Expects a 3D numpy array of shape [H, W, C] as input.
-        """
-        transform = [
-            A.Flip(p=0.5),
-            A.Rotate(limit=180, interpolation=cv2.INTER_NEAREST, border_mode=cv2.BORDER_CONSTANT, p=1.0),
-            A.Resize(*size, interpolation=cv2.INTER_NEAREST),
-            ToWBM(),
-        ]
-
-        return transform
-
-    @staticmethod
-    def shift_transform(size: tuple,
-                        shift: float = 0.25,
-                        **kwargs):  # pylint: disable=unused-argument
-        transform = [
-            A.Flip(p=0.5),
-            A.ShiftScaleRotate(
-                shift_limit=shift,
-                scale_limit=0,
-                rotate_limit=0,
-                interpolation=cv2.INTER_NEAREST,
-                border_mode=cv2.BORDER_CONSTANT,
-                value=0,
-                p=1.0
-            ),
-            A.Resize(*size, interpolation=cv2.INTER_NEAREST),
-            ToWBM(),
-        ]
-
-        return transform
-
-    @staticmethod
-    def cutout_transform(size: tuple, num_holes: int = 4, **kwargs):  # pylint: disable=unused-argument
-        cut_h = size[0] // 5
-        cut_w = size[1] // 5
-        transform = [
-            A.Flip(p=0.5),
-            A.Resize(*size, interpolation=cv2.INTER_NEAREST),
-            A.Cutout(num_holes=num_holes, max_h_size=cut_h, max_w_size=cut_w, fill_value=0, p=0.5),
-            ToWBM()
-        ]
-
-        return transform
-
-    @staticmethod
-    def noise_transform(size: tuple, noise: float = 0.05, **kwargs):  # pylint: disable=unused-argument
-        if noise <= 0.:
-            raise ValueError("'noise' probability must be larger than zero.")
-        transform = [
-            A.Resize(*size, interpolation=cv2.INTER_NEAREST),
-            ToWBM(),
-            MaskedBernoulliNoise(noise=noise),
-        ]
-
-        return transform
-
-    @staticmethod
-    def crop_rotate_transform(size: tuple,
-                              scale: tuple = (0.5, 1.0),
-                              ratio: tuple = (0.9, 1.1),
-                              **kwargs):  # pylint: disable=unused-argument
-        """
-        Rotation & crop-based augmentation, with `albumentations`.
-        Expects a 3D numpy array of shape [H, W, C] as input.
-        """
-        transform = [
-            A.Flip(p=0.5),
-            A.Rotate(limit=180, interpolation=cv2.INTER_NEAREST, border_mode=cv2.BORDER_CONSTANT, p=1.0),
-            A.RandomResizedCrop(*size, scale=scale, ratio=ratio, interpolation=cv2.INTER_NEAREST, p=1.0),
-            ToWBM(),
-        ]
-
-        return transform
-
-    @staticmethod
-    def shift_crop_rotate_transform(size: tuple,
-                                    shift: float = 0.25,
-                                    scale: tuple = (0.5, 1.0),
-                                    ratio: tuple = (0.9, 1.1),
-                                    **kwargs):  # pylint: disable=unused-argument
-        transform = [
-            A.Flip(p=0.5),
-            A.ShiftScaleRotate(
-                shift_limit=shift,
-                scale_limit=0,
-                rotate_limit=0,
-                interpolation=cv2.INTER_NEAREST,
-                border_mode=cv2.BORDER_CONSTANT,
-                value=0,
-                p=0.9,
-            ),
-            A.Rotate(limit=180, interpolation=cv2.INTER_NEAREST, border_mode=cv2.BORDER_CONSTANT, p=1.0),
-            A.RandomResizedCrop(*size, scale=scale, ratio=ratio, interpolation=cv2.INTER_NEAREST, p=1.0),
-            ToWBM(),
-        ]
-
-        return transform
-
-    @staticmethod
-    def shift_crop_rotate_cutout_noise_transform(size: tuple,
-                                                 shift: float = 0.25,
-                                                 scale: tuple = (0.5, 1.0),
-                                                 ratio: tuple = (0.9, 1.1),
-                                                 num_holes: int = 4,
-                                                 noise: float = 0.05,
-                                                 **kwargs):  # pylint: disable=unused-argument
-        cut_h = size[0] // 5
-        cut_w = size[1] // 5
-        transform = [
-            A.Flip(p=0.5),
-            A.ShiftScaleRotate(
-                shift_limit=shift,
-                scale_limit=0,
-                rotate_limit=0,
-                interpolation=cv2.INTER_NEAREST,
-                border_mode=cv2.BORDER_CONSTANT,
-                value=0,
-                p=0.75,
-            ),
-            A.Rotate(limit=180, interpolation=cv2.INTER_NEAREST, border_mode=cv2.BORDER_CONSTANT, p=1.0),
-            A.RandomResizedCrop(*size, scale=scale, ratio=ratio, interpolation=cv2.INTER_NEAREST, p=1.0),
-            A.Cutout(num_holes=num_holes, max_h_size=cut_h, max_w_size=cut_w, fill_value=0, p=0.5),
-            ToWBM(),
-            MaskedBernoulliNoise(noise=noise),
-        ]
-
-        return transform
 
 
 def get_transform(data: str, size: int or tuple, mode: str, **kwargs):

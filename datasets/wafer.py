@@ -9,7 +9,7 @@ import torch
 import cv2
 
 from PIL import Image
-from torch.utils.data import Dataset, DataLoader
+from torch.utils.data import Dataset
 from sklearn.model_selection import train_test_split
 from sklearn.utils.class_weight import compute_class_weight
 
@@ -27,8 +27,8 @@ class WM811K(Dataset):
         'none'      : 8,
         '-'         : 9,
     }
-    idx2label = [k for k in label2idx]
-    num_classes = len(idx2label) - 1
+    idx2label = [k for k in label2idx.keys()]
+    num_classes = len(idx2label) - 1  # exclude unlabeled (-)
 
     def __init__(self, root, transform=None, proportion=1.0, **kwargs):
         super(WM811K, self).__init__()
@@ -178,46 +178,3 @@ class WM811KForSimCLR(WM811K):
         x2 = self.decouple_mask(x2)
 
         return dict(x1=x1, x2=x2, y=y, idx=idx)
-
-
-def get_dataloaders(*datasets,
-                    batch_size: int,
-                    shuffle: bool = True,
-                    num_workers: int = 0,
-                    drop_last: bool = False,
-                    pin_memory: bool = True):
-    loader_configs = {
-        'batch_size': batch_size,
-        'shuffle': shuffle,
-        'num_workers': num_workers,
-        'drop_last': drop_last,
-        'pin_memory': pin_memory,
-    }
-    return [DataLoader(d, **loader_configs) for d in datasets]
-
-
-def get_dataloader(dataset: torch.utils.data.Dataset,
-                   batch_size: int,
-                   shuffle: bool = True,
-                   num_workers: int = 0,
-                   drop_last: bool = False,
-                   pin_memory: bool = True,
-                   balance: bool = False,
-                   ):
-    """Return a `DataLoader` instance."""
-    if balance:
-        from datasets.samplers import ImbalancedDatasetSampler  # pylint: disable=import-outside-toplevel
-        sampler = ImbalancedDatasetSampler(dataset)
-    else:
-        sampler = None
-
-    loader_configs = {
-        'dataset': dataset,
-        'batch_size': batch_size,
-        'shuffle': shuffle,
-        'sampler': sampler,
-        'num_workers': num_workers,
-        'drop_last': drop_last,
-        'pin_memory': pin_memory,
-    }
-    return DataLoader(**loader_configs)

@@ -10,7 +10,7 @@ import torch.nn as nn
 from torch.utils.tensorboard import SummaryWriter
 
 from tasks.base import Task
-from datasets.wafer import get_dataloader
+from datasets.loaders import get_dataloader
 from utils.logging import get_tqdm_config
 from utils.gradcam import GradCAM
 from utils.plotting import save_image_dpi
@@ -338,7 +338,7 @@ class RotateTransform(nn.Module):
         assert all([tensor.size() == tensors[0].size() for tensor in tensors])
 
         angles = torch.randint(
-            low=0, high=4, 
+            low=0, high=4,
             size=(tensors[0].size(0), ),
             device=tensors[0].device
         )

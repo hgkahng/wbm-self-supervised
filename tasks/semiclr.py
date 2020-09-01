@@ -9,7 +9,7 @@ import torch.nn as nn
 
 from models.base import BackboneBase, HeadBase
 from tasks.simclr import SimCLR
-from datasets.wafer import get_dataloader
+from datasets.loaders import get_dataloader
 from utils.loss import SimCLRLoss
 from utils.logging import get_tqdm_config
 

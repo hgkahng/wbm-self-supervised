@@ -11,7 +11,7 @@ from torch.utils.tensorboard import SummaryWriter
 from tasks.base import Task
 from tasks.denoising import Denoising
 
-from datasets.wafer import get_dataloader
+from datasets.loaders import get_dataloader
 from utils.logging import get_tqdm_config
 
 
