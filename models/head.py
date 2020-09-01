@@ -7,7 +7,7 @@ import collections
 import torch
 import torch.nn as nn
 
-from entmax import sparsemax
+# from entmax import sparsemax
 
 from models.base import FlattenHeadBase, GAPHeadBase
 from layers.core import Flatten
