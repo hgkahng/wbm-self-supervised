@@ -5,7 +5,6 @@
 - [OpenCV](https://pypi.org/project/opencv-python/)
 - [PyTorch](https://pytorch.org)
 - [PyTorch Lightning](https://github.com/PyTorchLightning/pytorch-lightning)
-- [entmax](https://github.com/deep-spin/entmax)
 - [kornia](https://github.com/kornia/kornia)
 ```
 conda update -n base conda  # use 4.8.4 or higher
