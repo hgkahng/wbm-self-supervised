@@ -138,8 +138,8 @@ class ResNetBackbone(BackboneBase):
     @classmethod
     def make_layers(cls, layer_cfg: dict, in_channels: int, **kwargs):
 
+        out_channels = 64
         layers = nn.Sequential()
-        out_channels = layer_cfg['channels'][0]  # 64
         block0 = nn.Sequential(
             collections.OrderedDict(
                 [
