@@ -4,3 +4,6 @@ checkpoints/
 checkpoints**/
 .vscode/
 .ipynb_checkpoints/
+results/
+temp/
+process_wafer40.py
