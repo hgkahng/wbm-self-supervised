@@ -8,6 +8,7 @@ from utils.initialization import initialize_weights
 
 
 def conv3x3(in_channels: int, out_channels: int, stride: int = 1):
+    """3x3 conv. padding is fixed to 1."""
     conv_kws = dict(
         in_channels=in_channels,
         out_channels=out_channels,
@@ -20,6 +21,7 @@ def conv3x3(in_channels: int, out_channels: int, stride: int = 1):
 
 
 def conv1x1(in_channels: int, out_channels: int, stride: int = 1):
+    """1x1 conv. padding is fixed to 1."""
     conv_kws = dict(
         in_channels=in_channels,
         out_channels=out_channels,
@@ -32,6 +34,7 @@ def conv1x1(in_channels: int, out_channels: int, stride: int = 1):
 
 
 def downsample1x1(in_channels: int, out_channels: int, stride: int = 2):
+    """1x1 conv + batch normalization. Used for identity mappings. No padding."""
     return nn.Sequential(
         conv1x1(in_channels, out_channels, stride),
         nn.BatchNorm2d(out_channels)
@@ -43,12 +46,12 @@ class BasicBlock(nn.Module):
     def __init__(self, in_channels: int, out_channels: int, stride: int = 1, **kwargs):
         super(BasicBlock, self).__init__()
 
-        self.widening_factor = wf = kwargs.get('widening_factor', 1)
+        self.widening_factor = wf = kwargs.get('widening_factor', 1)         # for wide ResNets.
 
-        self.conv1 = conv3x3(in_channels, out_channels * wf, stride=stride)
+        self.conv1 = conv3x3(in_channels, out_channels * wf, stride=stride)  # if stride=2, spatial resolution /= 2.
         self.bnorm1 = nn.BatchNorm2d(out_channels * wf)
         self.relu1 = nn.ReLU(inplace=True)
-        self.conv2 = conv3x3(out_channels * wf, out_channels, stride=1)
+        self.conv2 = conv3x3(out_channels * wf, out_channels, stride=1)      # stride=1, fixed always.
         self.bnorm2 = nn.BatchNorm2d(out_channels)
         self.relu2 = nn.ReLU(inplace=True)
 
@@ -56,7 +59,7 @@ class BasicBlock(nn.Module):
         if self.stride != 1:
             self.downsample = downsample1x1(in_channels, out_channels, stride)
         else:
-            self.downsample = None  # FIXME
+            self.downsample = None
 
     def forward(self, x):
 
@@ -90,9 +93,9 @@ class BottleNeck(nn.Module):
         self.relu3 = nn.ReLU(inplace=True)
 
         self.stride = stride
-        if (self.stride != 1) or (in_channels != out_channels * wf * self.expansion):
+        if (self.stride != 1) or (in_channels != out_channels * self.expansion):
             self.downsample = downsample1x1(
-                in_channels, out_channels * self.expansion, stride)
+                in_channels, out_channels * self.expansion, stride)  # size of 'conv3' and 'downsample' must match
         else:
             self.downsample = None
 
