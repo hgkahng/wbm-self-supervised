@@ -50,7 +50,10 @@ class WM811kProcessor(object):
                 pbar.set_description_str(f" {root} - {i:06} ")
                 pbar.update(1)
 
-    def write_unlabeled_images(self, root: str = './data/wm811k/unlabeled/', train_size: float = 0.8, valid_size: float = 0.1):
+    def write_unlabeled_images(self,
+                               root: str = './data/wm811k/unlabeled/',
+                               train_size: float = 0.8,
+                               valid_size: float = 0.1):
         """Write wafer images without labels."""
         test_size = 1 - train_size - valid_size
 
@@ -73,7 +76,10 @@ class WM811kProcessor(object):
         self.write_images(os.path.join(root, 'valid'), valid_indices)
         self.write_images(os.path.join(root, 'test'), test_indices)
 
-    def write_labeled_images(self, root: str = './data/wm811k/labeled/', train_size: float = 0.8, valid_size: float = 0.1):
+    def write_labeled_images(self,
+                             root: str = './data/wm811k/labeled/',
+                             train_size: float = 0.8,
+                             valid_size: float = 0.1):
         """Write wafer images with labels."""
         test_size = 1 - train_size - valid_size
 
