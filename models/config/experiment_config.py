@@ -437,3 +437,12 @@ class AttnCLRConfig(SimCLRConfig):
     @property
     def task(self):
         return 'attnclr'
+
+
+class MixupConfig(ClassificationConfig):
+    def __init__(self, args, **kwargs):
+        super(ClassificationConfig, self).__init__(args, **kwargs)
+
+    @property
+    def task(self):
+        return 'mixup-disabled' if self.disable_mixup else 'mixup'
