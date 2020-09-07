@@ -73,7 +73,7 @@ python run_mixup.py \
     --warmup_steps 0 \
     --checkpoint_root "./checkpoints/" \
 ```
-- Adding a `--disable_mixup` flag will resort to simple classification withou mixup. This is implemented for the ease of making comparisons only.
+- Adding a `--disable_mixup` flag will resort to simple classification without mixup. This is implemented for the ease of making comparisons only.
 ### 2. Using bash scripts
 ```
 ./experiments/mixup.sh
