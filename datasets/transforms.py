@@ -15,7 +15,6 @@ from albumentations.core.transforms_interface import BasicTransform
 from albumentations.core.transforms_interface import ImageOnlyTransform
 
 from torch.distributions import Bernoulli
-from kornia.filters import GaussianBlur2d, MedianBlur
 
 
 class RandomFlip(object):
@@ -93,6 +92,7 @@ class MaskedGaussianBlur(object):
         else:
             assert isinstance(sigma, tuple)
             self.sigma = sigma
+        from kornia.filters import GaussianBlur2d
         self.gblur = GaussianBlur2d(
             kernel_size=self.kernel_size,
             sigma=(sigma, sigma),
@@ -120,6 +120,7 @@ class MaskedMedianBlur(object):
         else:
             assert isinstance(kernel_size, tuple)
             self.kernel_size = kernel_size
+        from kornia.filters import MedianBlur
         self.mblur = MedianBlur(kernel_size=self.kernel_size)
 
     def __call__(self, x: torch.Tensor):
