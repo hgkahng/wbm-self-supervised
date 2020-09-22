@@ -11,10 +11,10 @@ from datasets.wafer import WM811K
 from datasets.cifar import CustomCIFAR10
 from datasets.transforms import get_transform
 
-from models.config import ClassificationConfig
-from models.config import ALEXNET_BACKBONE_CONFIGS
-from models.config import VGGNET_BACKBONE_CONFIGS
-from models.config import RESNET_BACKBONE_CONFIGS
+from configs import ClassificationConfig
+from configs import ALEXNET_BACKBONE_CONFIGS
+from configs import VGGNET_BACKBONE_CONFIGS
+from configs import RESNET_BACKBONE_CONFIGS
 from models.alexnet import AlexNetBackbone
 from models.vggnet import VggNetBackbone
 from models.resnet import ResNetBackbone

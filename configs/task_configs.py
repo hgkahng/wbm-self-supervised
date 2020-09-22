@@ -441,7 +441,7 @@ class AttnCLRConfig(SimCLRConfig):
 
 class MixupConfig(ClassificationConfig):
     def __init__(self, args, **kwargs):
-        super(ClassificationConfig, self).__init__(args, **kwargs)
+        super(MixupConfig, self).__init__(args, **kwargs)
 
     @property
     def task(self):

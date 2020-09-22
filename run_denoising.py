@@ -10,9 +10,9 @@ import torch.nn as nn
 from datasets.wafer import WM811KForDenoising
 from datasets.transforms import get_transform
 
-from models.config import DenoisingConfig
-from models.config import RESNET_ENCODER_CONFIGS
-from models.config import RESNET_DECODER_CONFIGS
+from configs.task_configs import DenoisingConfig
+from configs.network_configs import RESNET_ENCODER_CONFIGS
+from configs.network_configs import RESNET_DECODER_CONFIGS
 from models.resnet.backbone import ResNetBackbone as ResNetEncoder
 from models.resnet.decoder import ResNetDecoder
 

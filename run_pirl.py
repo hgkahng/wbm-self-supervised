@@ -9,22 +9,19 @@ import torch
 from datasets.wafer import WM811KForPIRL
 from datasets.transforms import get_transform
 
-from models.config import PIRLConfig
-from models.config import ALEXNET_BACKBONE_CONFIGS
-from models.config import VGGNET_BACKBONE_CONFIGS
-from models.config import RESNET_BACKBONE_CONFIGS
+from configs.task_configs import PIRLConfig
+from configs.network_configs import ALEXNET_BACKBONE_CONFIGS
+from configs.network_configs import VGGNET_BACKBONE_CONFIGS
+from configs.network_configs import RESNET_BACKBONE_CONFIGS
 from models.alexnet import AlexNetBackbone
 from models.vggnet import VggNetBackbone
 from models.resnet import ResNetBackbone
 from models.head import GAPProjector, NonlinearProjector
-
 from tasks.pirl import PIRL, MemoryBank
-
 from utils.loss import PIRLLoss
 from utils.metrics import TopKAccuracy
 from utils.logging import get_logger
 from utils.optimization import get_optimizer, get_scheduler
-
 
 
 AVAILABLE_MODELS = {

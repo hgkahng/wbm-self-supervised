@@ -11,10 +11,10 @@ import numpy as np
 from datasets.wafer import WM811K
 from datasets.transforms import get_transform
 
-from models.config import MixupConfig
-from models.config import ALEXNET_BACKBONE_CONFIGS
-from models.config import VGGNET_BACKBONE_CONFIGS
-from models.config import RESNET_BACKBONE_CONFIGS
+from configs.task_configs import MixupConfig
+from configs.network_configs import ALEXNET_BACKBONE_CONFIGS
+from configs.network_configs import VGGNET_BACKBONE_CONFIGS
+from configs.network_configs import RESNET_BACKBONE_CONFIGS
 from models.alexnet import AlexNetBackbone
 from models.vggnet import VggNetBackbone
 from models.resnet import ResNetBackbone

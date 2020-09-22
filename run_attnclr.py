@@ -10,7 +10,8 @@ from datasets.wafer import WM811KForSimCLR
 from datasets.cifar import CIFAR10ForSimCLR
 from datasets.transforms import get_transform
 
-from models.config import AttnCLRConfig, RESNET_BACKBONE_CONFIGS
+from configs.task_configs import AttnCLRConfig
+from configs.network_configs import RESNET_BACKBONE_CONFIGS
 from models.resnet import ResNetBackbone
 from models.head import GAPProjector, AttentionProjector
 
