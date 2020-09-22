@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 
+import cv2
 import numpy as np
 
 from torchvision.datasets.cifar import CIFAR10
@@ -41,6 +42,16 @@ class CustomCIFAR10(CIFAR10):
             img = self.transform(img)
 
         return dict(x=img, y=target, idx=index)
+
+    @staticmethod
+    def load_image_cv2(path: str):
+        img = cv2.imread(path, cv2.IMREAD_UNCHANGED)
+        if img.ndim == 3:
+            return cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+        elif img.ndim == 2:
+            return cv2.cvtColor(img, cv2.COLOR_GRAY2RGB)
+        else:
+            raise NotImplementedError
 
 
 class CIFAR10ForSimCLR(CIFAR10):
