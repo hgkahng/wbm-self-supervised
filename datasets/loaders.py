@@ -9,7 +9,7 @@ def get_dataloader(dataset: torch.utils.data.Dataset,
                    shuffle: bool = True,
                    num_workers: int = 0,
                    drop_last: bool = False,
-                   pin_memory: bool = True,
+                   pin_memory: bool = False,
                    balance: bool = False,
                    ):
     """Return a `DataLoader` instance."""
