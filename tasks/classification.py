@@ -23,7 +23,8 @@ class Classification(Task):
                  loss_function,
                  metrics: dict,
                  checkpoint_dir: str,
-                 write_summary: bool):
+                 write_summary: bool,
+                 **kwargs):
         super(Classification, self).__init__()
 
         self.backbone = backbone
