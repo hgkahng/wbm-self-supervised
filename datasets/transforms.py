@@ -22,7 +22,7 @@ class NumpyToTensor(BasicTransform):
     def targets_as_params(self):
         return ['image']
 
-    def apply(self, img: np.ndarray):
+    def apply(self, img: np.ndarray, **kwargs):
         if isinstance(img, np.ndarray):
             if img.ndim == 2:
                 img = img[:, :, None]
@@ -30,6 +30,12 @@ class NumpyToTensor(BasicTransform):
             if isinstance(img, torch.ByteTensor):
                 img = img.float().div(255)
         return img
+
+    def get_transform_init_args_names(self):
+        return []
+
+    def get_params_dependent_on_targets(self, params):
+        return {}
 
 
 class ToWBM(BasicTransform):
@@ -40,7 +46,7 @@ class ToWBM(BasicTransform):
     def targets(self):
         return {"image": self.apply}
 
-    def apply(self, img: np.ndarray):
+    def apply(self, img: np.ndarray, **kwargs):
         if isinstance(img, np.ndarray):
             if img.ndim == 2:
                 img = img[:, :, None]
