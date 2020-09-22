@@ -36,7 +36,7 @@ class CustomCIFAR10(CIFAR10):
 
     def __getitem__(self, index):
         img, target = self.data[index], self.targets[index]
-        img = Image.fromarray(img)
+        # img = Image.fromarray(img)
 
         if self.transform is not None:
             img = self.transform(img)
@@ -64,7 +64,7 @@ class CIFAR10ForSimCLR(CIFAR10):
 
     def __getitem__(self, index):
         img, target = self.data[index], self.targets[index]
-        img = Image.fromarray(img)
+        # img = Image.fromarray(img)
 
         if self.transform is not None:
             x1 = self.transform(img)
