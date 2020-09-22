@@ -116,6 +116,7 @@ class GAPProjector(GAPClassifier):
     def num_features(self):
         return self.num_classes
 
+
 class NonlinearProjector(GAPHeadBase):
     def __init__(self, in_channels: int, num_features: int):
         """
@@ -139,9 +140,10 @@ class NonlinearProjector(GAPHeadBase):
                 [
                     ('gap', nn.AdaptiveAvgPool2d(1)),
                     ('flatten', Flatten()),
-                    ('linear1', nn.Linear(in_channels, in_channels)),
+                    ('linear1', nn.Linear(in_channels, in_channels, bias=False)),
+                    ('bnorm1', nn.BatchNorm1d(in_channels)),
                     ('relu1', nn.ReLU(inplace=True)),
-                    ('linear2', nn.Linear(in_channels, num_features))
+                    ('linear2', nn.Linear(in_channels, num_features, bias=True))
                 ]
             )
         )
