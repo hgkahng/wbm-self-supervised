@@ -193,7 +193,7 @@ class PIRLLoss(nn.Module):
 
 class SimCLRLoss(nn.Module):
     """
-    Implementation borrowed from the following:
+    Modified implementation of the following:
         https://github.com/HobbitLong/SupContrast
     """
     def __init__(self, temperature: float = 0.07, contrast_mode: str = 'all', reduction: str = 'mean'):
@@ -218,7 +218,7 @@ class SimCLRLoss(nn.Module):
         features = nn.functional.normalize(features, dim=-1)
 
         # The `mask` is an indicator for the positive examples. 1 if positive, 0 if negative.
-        # In most cases, the `mask` will have values of 1 along the diagonals, implying that
+        # In most cases, the `mask` will have values of 1 along the diagonal, implying that
         # two or more views of the same sample must map to a nearby manifold.
         if labels is not None and mask is not None:
             raise ValueError("Only one of `labels` and `mask` should be specified.")
@@ -228,8 +228,7 @@ class SimCLRLoss(nn.Module):
             # Use only with fully supervised data (100% labels)
             labels = labels.contiguous().view(-1, 1)
             if labels.shape[0] != batch_size:
-                raise ValueError(
-                    "Number of labels does not match the number of samples.")
+                raise ValueError("Number of labels does not match the number of samples.")
             mask = torch.eq(labels, labels.T).float()
         else:
             mask = mask.float().to(device)
@@ -269,7 +268,7 @@ class SimCLRLoss(nn.Module):
         )
         mask = mask * logits_mask                                                 # (K x B, N x B)
 
-        # Compute log probabilities.
+        # Compute log probabilities
         exp_logits = torch.exp(logits) * logits_mask                              # (K x B, N x B)
         log_prob   = logits - torch.log(exp_logits.sum(1, keepdim=True))          # (K x B, N x B) - (K x B, 1)
 
@@ -281,11 +280,11 @@ class SimCLRLoss(nn.Module):
         loss = loss.view(anchor_count, batch_size)                                # (K, B)
 
         if self.reduction == 'mean':
-            return loss.mean()
+            return loss.mean(), logits, mask
         elif self.reduction == 'sum':
-            return loss.sum()
+            return loss.sum(), logits, mask
         elif self.reduction is 'none':
-            return loss
+            return loss, logits, mask
         else:
             raise NotImplementedError
 
