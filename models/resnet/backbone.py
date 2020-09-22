@@ -127,7 +127,8 @@ class ResNetBackbone(BackboneBase):
         self.layers = self.make_layers(
             layer_cfg=self.layer_config,
             in_channels=self.in_channels,
-            widening_factor=self.layer_config.get('widening_factor', 1)
+            widening_factor=self.layer_config.get('widening_factor', 1),
+            first_conv=self.layer_config.get('first_conv', 7)
         )
 
         initialize_weights(self.layers, activation='relu')
@@ -140,16 +141,27 @@ class ResNetBackbone(BackboneBase):
 
         out_channels = 64
         layers = nn.Sequential()
-        block0 = nn.Sequential(
-            collections.OrderedDict(
-                [
-                    ('conv1', nn.Conv2d(in_channels, out_channels, kernel_size=7, stride=2, padding=3, bias=False)),  # (3, 224, 224) -> (64, 112, 112)
-                    ('bnorm1', nn.BatchNorm2d(out_channels)),
-                    ('relu1', nn.ReLU(inplace=True)),
-                    ('pool1', nn.MaxPool2d(kernel_size=3, stride=2, padding=1))                                       # (64, 112, 112) -> (64, 56, 56)
-                ]
+        if kwargs['first_conv'] == 3:
+            block0 = nn.Sequential(
+                collections.OrderedDict(
+                    [
+                        ('conv1', nn.Conv2d(in_channels, out_channels, kernel_size=3, stride=1, padding=1, bias=False)),
+                        ('bnorm1', nn.BatchNorm2d(out_channels)),
+                        ('relu1', nn.ReLU(inplace=True)),
+                    ]
+                )
             )
-        )
+        else:
+            block0 = nn.Sequential(
+                collections.OrderedDict(
+                    [
+                        ('conv1', nn.Conv2d(in_channels, out_channels, kernel_size=7, stride=2, padding=3, bias=False)),
+                        ('bnorm1', nn.BatchNorm2d(out_channels)),
+                        ('relu1', nn.ReLU(inplace=True)),
+                        ('pool1', nn.MaxPool2d(kernel_size=3, stride=2, padding=1))
+                    ]
+                )
+            )
         layers.add_module('block0', block0)
         in_channels = out_channels  # 64
 
