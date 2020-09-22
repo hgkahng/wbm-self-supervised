@@ -51,8 +51,8 @@ class SimCLR(Task):
 
         logger = kwargs.get('logger', None)
 
-        self.backbone = self.backbone.to(device)
-        self.projector = self.projector.to(device)
+        self.backbone.to(device)
+        self.projector.to(device)
 
         train_loader = get_dataloader(train_set, batch_size, num_workers=num_workers)
         valid_loader = get_dataloader(valid_set, batch_size, num_workers=num_workers)
@@ -78,7 +78,12 @@ class SimCLR(Task):
 
                 # 2. Epoch history (other metrics if provided)
                 if self.metrics is not None:
-                    raise NotImplementedError
+                    assert isinstance(self.metrics, dict)
+                    for metric_name, _ in self.metrics.items():
+                        epoch_history[metric_name] = {
+                            'train': train_history.get(metric_name),
+                            'valid': valid_history.get(metric_name)
+                        }
 
                 # 3. TensorBoard
                 if self.writer is not None:
@@ -95,13 +100,16 @@ class SimCLR(Task):
                                 global_step=epoch
                             )
 
-                # 4. Save model if it is the current best
+                # 4-1. Save model if it is the current best
                 valid_loss = epoch_history['loss']['valid']
                 if valid_loss < best_valid_loss:
                     best_valid_loss = valid_loss
                     best_epoch = epoch
                     self.save_checkpoint(self.best_ckpt, epoch=epoch, **epoch_history)
-                    if kwargs.get('save_every', False):
+
+                # 4-2. Save intermediate models
+                if isinstance(kwargs.get('save_every'), int):
+                    if epoch % kwargs.get('save_every') == 0:
                         new_ckpt = os.path.join(self.checkpoint_dir, f'epoch_{epoch:04d}.loss_{valid_loss:.4f}.pt')
                         self.save_checkpoint(new_ckpt, epoch=epoch, **epoch_history)
 
@@ -132,38 +140,45 @@ class SimCLR(Task):
     def train(self, data_loader: torch.utils.data.DataLoader, device: str, **kwargs):  # pylint: disable=unused-argument
         """Train function defined for a single epoch."""
 
-        train_loss = 0.
+        out = {'loss': 0.}
         steps_per_epoch = len(data_loader)
         self._set_learning_phase(train=True)
 
         with tqdm.tqdm(**get_tqdm_config(steps_per_epoch, leave=False, color='red')) as pbar:
             for i, batch in enumerate(data_loader):
 
-                self.optimizer.zero_grad()
                 x1, x2 = batch['x1'].to(device), batch['x2'].to(device)
                 z1, z2 = self.predict(x1), self.predict(x2)
-                loss = self.loss_function(features=torch.stack([z1, z2], dim=1))
+                loss, logits, mask = self.loss_function(features=torch.stack([z1, z2], dim=1))
+
+                # Backpropagation & update
                 loss.backward()
                 self.optimizer.step()
+                self.optimizer.zero_grad()
 
-                train_loss += loss.item()
-                desc = f" Batch [{i+1:>4}/{steps_per_epoch:>4}]"
-                desc += f" Loss: {train_loss/(i+1):.4f} "
+                # Accumulate loss & metrics
+                out['loss'] += loss.item()
+                if self.metrics is not None:
+                    assert isinstance(self.metrics, dict)
+                    for metric_name, metric_function in self.metrics.items():
+                        if metric_name not in out.keys():
+                            out[metric_name] = 0.
+                        with torch.no_grad():
+                            logits = logits.detach()
+                            targets = mask.detach().eq(1).nonzero(as_tuple=True)[1]
+                            out[metric_name] += metric_function(logits, targets)
+
+                desc = f" Batch: [{i+1:>4}/{steps_per_epoch:>4}]: "
+                desc += " | ".join ([f"{k}: {v/(i+1):.4f}" for k, v in out.items()])
                 pbar.set_description_str(desc)
                 pbar.update(1)
 
-            out = {
-                'loss': train_loss / steps_per_epoch,
-            }
-            if self.metrics is not None:
-                raise NotImplementedError
-
-            return out
+            return {k: v / steps_per_epoch for k, v in out.items()}
 
     def evaluate(self, data_loader: torch.utils.data.DataLoader, device: str, **kwargs):  # pylint: disable=unused-argument
         """Evaluate current model. Running a single pass through the given dataset."""
 
-        valid_loss = 0.
+        out = {'loss': 0.}
         steps_per_epoch = len(data_loader)
         self._set_learning_phase(train=False)
 
@@ -172,14 +187,20 @@ class SimCLR(Task):
 
                 x1, x2 = batch['x1'].to(device), batch['x2'].to(device)
                 z1, z2 = self.predict(x1), self.predict(x2)
-                loss = self.loss_function(features=torch.stack([z1, z2], dim=1))
-                valid_loss += loss.item()
+                loss, logits, mask = self.loss_function(features=torch.stack([z1, z2], dim=1))
 
-            out = {'loss': valid_loss / steps_per_epoch}
-            if self.metrics is not None:
-                raise NotImplementedError
+                # Accumulate loss & metrics
+                out['loss'] += loss.item()
+                if self.metrics is not None:
+                    assert isinstance(self.metrics, dict)
+                    for metric_name, metric_function in self.metrics.items():
+                        if metric_name not in out.keys():
+                            out[metric_name] = 0.
+                        logits = logits.detach()
+                        targets = mask.detach().eq(1).nonzero(as_tuple=True)[1]
+                        out[metric_name] += metric_function(logits, targets)
 
-            return out
+            return {k: v / steps_per_epoch for k, v in out.items()}
 
     def predict(self, x: torch.Tensor):
         return self.projector(self.backbone(x))
