@@ -2,7 +2,6 @@
 
 import os
 import sys
-import argparse
 
 import torch
 
@@ -21,9 +20,8 @@ from utils.logging import get_logger
 from utils.optimization import get_optimizer, get_scheduler
 
 
-
 AVAILABLE_MODELS = {
-    'resnet': (RESNET_BACKBONE_CONFIGS, SimCLRConfig, ResNetBackbone),
+    'resnet': (RESNET_BACKBONE_CONFIGS, ResNetBackbone),
 }
 
 PROJECTOR_TYPES = {
@@ -39,68 +37,17 @@ IN_CHANNELS = {
 }
 
 
-def parse_args():
-
-    parser = argparse.ArgumentParser("Simple Contrastive Learning Framework.", add_help=True)
-
-    g1 = parser.add_argument_group('General')
-    g1.add_argument('--data', type=str, choices=('wm811k', 'cifar10', 'stl10', 'imagenet'), required=True)
-    g1.add_argument('--input_size', type=int, choices=(32, 64, 96, 112, 224), required=True)
-
-    g2 = parser.add_argument_group('CNN Backbone')
-    g2.add_argument('--backbone_type', type=str, default='resnet', choices=('resnet', ), required=True)
-    g2.add_argument('--backbone_config', type=str, default='50.tiny', required=True)
-
-    g3 = parser.add_argument_group('SimCLR')
-    g3.add_argument('--projector_type', type=str, default='mlp', choices=('linear', 'mlp'))
-    g3.add_argument('--projector_size', type=int, default=128, help='Dimension of projection head.')
-    g3.add_argument('--temperature', type=float, default=0.07, help='Logit scaling factor.')
-    g3.add_argument('--augmentation', type=str, default='simclr', choices=('simclr', 'moco'))
-
-    g4 = parser.add_argument_group('Model Training')
-    g4.add_argument('--epochs', type=int, default=1000)
-    g4.add_argument('--batch_size', type=int, default=1024)
-    g4.add_argument('--num_workers', type=int, default=0)
-    g4.add_argument('--device', type=str, default='cuda:0', choices=('cuda', 'cuda:0', 'cuda:1', 'cuda:2', 'cuda:3', 'cpu'))
-
-    g5 = parser.add_argument_group('Regularization')  # pylint: disable=unused-variable
-
-    g6 = parser.add_argument_group('Optimizer')
-    g6.add_argument('--optimizer', type=str, default='sgd', choices=('sgd', 'adamw', 'lars'))
-    g6.add_argument('--learning_rate', type=float, default=0.01)
-    g6.add_argument('--weight_decay', type=float, default=0.001)
-    g6.add_argument('--momentum', type=float, default=0.9, help='only for SGD.')
-
-    g7 = parser.add_argument_group('Scheduler')
-    g7.add_argument('--scheduler', type=str, default='cosine', choices=('step', 'cosine', 'restart', 'none'))
-    g7.add_argument('--milestone', type=int, default=None, help='For step decay.')
-    g7.add_argument('--warmup_steps', type=int, default=5, help='For linear warmups.')
-    g7.add_argument('--cycles', type=int, default=1, help='For hard restarts.')
-
-    g8 = parser.add_argument_group('Logging')
-    g8.add_argument('--checkpoint_root', type=str, default='./checkpoints/')
-    g8.add_argument('--write_summary', action='store_true', help='write summaries with TensorBoard.')
-    g8.add_argument('--save_every', type=int, default=None, help='save model checkpoint every `save_every` epochs.')
-
-    g9 = parser.add_argument_group('Resuming training from a checkpoint')
-    g9.add_argument('--resume_from_checkpoint', type=str, default=None)
-
-    return parser.parse_args()
-
-
-def main(args):
+def main():
     """Main function."""
 
     # 1. Configurations
-    torch.backends.cudnn.benchmark = True
-    BACKBONE_CONFIGS, Config, Backbone = AVAILABLE_MODELS[args.backbone_type]
-    Projector = PROJECTOR_TYPES[args.projector_type]
-
-    config = Config(args)
+    config = SimCLRConfig.from_command_line()
     config.save()
-
     logfile = os.path.join(config.checkpoint_dir, 'main.log')
     logger  = get_logger(stream=False, logfile=logfile)
+
+    BACKBONE_CONFIGS, Backbone = AVAILABLE_MODELS[config.backbone_type]
+    Projector = PROJECTOR_TYPES[config.projector_type]
 
     # 2. Data
     data_transforms = {
@@ -203,9 +150,7 @@ def main(args):
 
     if config.resume_from_checkpoint is not None:
         logger.info(f"Resuming from checkpoint: {config.resume_from_checkpoint}")
-        model_ckpt = os.path.join(config.resume_from_checkpoint, 'best_model.pt')
-        experiment.load_model_from_checkpoint(model_ckpt)  # load model & optimizer
-
+        experiment.load_model_from_checkpoint(config.resume_from_checkpoint)  # load model & optimizer
         # Assign optimizer variables to appropriate device
         for state in experiment.optimizer.state.values():
             for k, v in state.items():
@@ -217,7 +162,9 @@ def main(args):
 
 
 if __name__ == '__main__':
+
+    torch.backends.cudnn.benchmark = True
     try:
-        main(parse_args())
+        main()
     except KeyboardInterrupt:
         sys.exit(0)

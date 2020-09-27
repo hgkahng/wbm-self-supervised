@@ -23,11 +23,6 @@ VGGNET_BACKBONE_CONFIGS = VGGNET_ENCODER_CONFIGS = {
 
 
 RESNET_BACKBONE_CONFIGS = RESNET_ENCODER_CONFIGS = {
-    '9.original': {
-        'block_type': 'basic',
-        'channels': [64] * 1 + [128] * 1 + [256] * 1 + [512] * 1,
-        'strides': [1] + [2] + [2] + [2],
-    },
     '18.original': {
         'block_type': 'basic',
         'channels': [64] * 2 + [128] * 2 + [256] * 2 + [512] * 2,
