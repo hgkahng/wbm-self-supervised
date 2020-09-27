@@ -17,11 +17,7 @@ class BackboneBase(nn.Module):
     def forward(self, x):
         raise NotImplementedError
 
-    def freeze_weights(self, to_freeze: list = []):
-        """
-        Freeze layers by their names. Searches through
-        the hierarchy of layers to find an exact match.
-        """
+    def freeze_weights(self):
         for p in self.parameters():
             p.requires_grad = False
 
@@ -42,7 +38,6 @@ class BackboneBase(nn.Module):
         """
         ckpt = torch.load(path, map_location='cpu')
         self.load_state_dict(ckpt[key])
-        # self.to(self.device)
 
 
 class HeadBase(nn.Module):
@@ -67,7 +62,6 @@ class HeadBase(nn.Module):
         """
         ckpt = torch.load(path, map_location='cpu')
         self.load_state_dict(ckpt[key])
-        # self.to(self.device)
 
 
 class ConvHeadBase(HeadBase):
