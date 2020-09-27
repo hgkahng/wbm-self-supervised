@@ -16,15 +16,15 @@ from utils.logging import make_epoch_description
 
 class Classification(Task):
     def __init__(self,
-                 backbone,
-                 classifier,
-                 optimizer,
-                 scheduler,
-                 loss_function,
+                 backbone: nn.Module,
+                 classifier: nn.Module,
+                 optimizer: torch.optim.Optimizer,
+                 scheduler: torch.optim.lr_scheduler._LRScheduler,
+                 loss_function: nn.Module,
                  metrics: dict,
                  checkpoint_dir: str,
                  write_summary: bool,
-                 **kwargs):
+                 **kwargs):  # pylint: disable=too-many-arguments
         super(Classification, self).__init__()
 
         self.backbone = backbone
@@ -51,29 +51,20 @@ class Classification(Task):
 
         logger = kwargs.get('logger', None)
 
-        self.backbone = self.backbone.to(device)
-        self.classifier = self.classifier.to(device)
-        
-        balance = kwargs.get('balance', False)
-        if logger is not None:
-            logger.info(f"Class balance: {balance}")
-        shuffle = not balance
+        self.backbone.to(device)
+        self.classifier.to(device)
 
-        train_loader = get_dataloader(train_set, batch_size, num_workers=num_workers, shuffle=shuffle, balance=balance)
-        valid_loader = get_dataloader(valid_set, batch_size, num_workers=num_workers, balance=False)
+        if train_set.__class__.__name__ == 'WM811K':
+            train_loader = get_dataloader(train_set, batch_size, num_workers=num_workers, shuffle=False, balance=True)
+        else:
+            train_loader = get_dataloader(train_set, batch_size, num_workers=num_workers, shuffle=True)
+        valid_loader = get_dataloader(valid_set, batch_size, num_workers=num_workers)
 
         with tqdm.tqdm(**get_tqdm_config(total=epochs, leave=True, color='blue')) as pbar:
 
-            # Determine model selection metric. Defaults to 'loss'.
-            eval_metric = kwargs.get('eval_metric', 'loss')
-            if eval_metric == 'loss':
-                best_metric_val = float('inf')
-            elif eval_metric in ['accuracy', 'precision', 'recall', 'f1', 'auroc', 'auprc']:
-                best_metric_val = 0
-            else:
-                raise NotImplementedError
-
+            best_valid_loss = float('inf')
             best_epoch = 0
+
             for epoch in range(1, epochs + 1):
 
                 # 0. Train & evaluate
@@ -112,19 +103,11 @@ class Classification(Task):
                         )
 
                 # 4. Save model if it is the current best
-                metric_val = epoch_history[eval_metric]['valid']
-                if eval_metric == 'loss':
-                    if metric_val <= best_metric_val:
-                        best_metric_val = metric_val
-                        best_epoch = epoch
-                        self.save_checkpoint(self.best_ckpt, epoch=epoch, **epoch_history)
-                elif eval_metric in ['accuracy', 'f1', 'auroc', 'auprc']:
-                    if metric_val >= best_metric_val:
-                        best_metric_val = metric_val
-                        best_epoch = epoch
-                        self.save_checkpoint(self.best_ckpt, epoch=epoch, **epoch_history)
-                else:
-                    raise NotImplementedError
+                valid_loss = epoch_history['loss']['valid']
+                if valid_loss <= best_valid_loss:
+                    best_valid_loss = valid_loss
+                    best_epoch = epoch
+                    self.save_checkpoint(self.best_ckpt, epoch=epoch, **epoch_history)
 
                 # 5. Update learning rate scheduler (optional)
                 if self.scheduler is not None:
