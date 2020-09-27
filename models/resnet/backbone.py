@@ -46,12 +46,12 @@ class BasicBlock(nn.Module):
     def __init__(self, in_channels: int, out_channels: int, stride: int = 1, **kwargs):
         super(BasicBlock, self).__init__()
 
-        self.widening_factor = wf = kwargs.get('widening_factor', 1)         # for wide ResNets.
+        width = kwargs.get('width', 1)
 
-        self.conv1 = conv3x3(in_channels, out_channels * wf, stride=stride)  # if stride=2, spatial resolution /= 2.
-        self.bnorm1 = nn.BatchNorm2d(out_channels * wf)
+        self.conv1 = conv3x3(in_channels, out_channels * width, stride=stride)  # if stride=2, spatial resolution /= 2.
+        self.bnorm1 = nn.BatchNorm2d(out_channels * width)
         self.relu1 = nn.ReLU(inplace=True)
-        self.conv2 = conv3x3(out_channels * wf, out_channels, stride=1)      # stride=1, fixed always.
+        self.conv2 = conv3x3(out_channels * width, out_channels, stride=1)      # stride=1, fixed always.
         self.bnorm2 = nn.BatchNorm2d(out_channels)
         self.relu2 = nn.ReLU(inplace=True)
 
@@ -80,22 +80,23 @@ class BottleNeck(nn.Module):
     def __init__(self, in_channels, out_channels, stride=1, **kwargs):
         super(BottleNeck, self).__init__()
 
-        self.widening_factor = wf = kwargs.get('widening_factor', 1)
+        width = kwargs.get('width', 1)
 
-        self.conv1 = conv1x1(in_channels, out_channels * wf, stride=1)                         # 256 -> 64 * wf
-        self.bnorm1 = nn.BatchNorm2d(out_channels * wf)
+        self.conv1 = conv1x1(in_channels, out_channels * width, stride=1)                    # 256 (64 x 4) -> 64 x w
+        self.bnorm1 = nn.BatchNorm2d(out_channels * width)                                   # 64 x w
         self.relu1 = nn.ReLU(inplace=True)
-        self.conv2 = conv3x3(out_channels * wf, out_channels * wf, stride)                     # 64 * wf -> 64 * wf
-        self.bnorm2 = nn.BatchNorm2d(out_channels * wf)
+
+        self.conv2 = conv3x3(out_channels * width, out_channels * width, stride)             # 64 * w -> 64 * w
+        self.bnorm2 = nn.BatchNorm2d(out_channels * width)                                   # 64 x w
         self.relu2 = nn.ReLU(inplace=True)
-        self.conv3 = conv1x1(out_channels * wf, out_channels * self.expansion, stride=1)       # 64 * wf -> 256
-        self.bnorm3 = nn.BatchNorm2d(out_channels * self.expansion)
+
+        self.conv3 = conv1x1(out_channels * width, out_channels * self.expansion, stride=1)  # 64 * w -> 256
+        self.bnorm3 = nn.BatchNorm2d(out_channels * self.expansion)                          # 256
         self.relu3 = nn.ReLU(inplace=True)
 
         self.stride = stride
-        if (self.stride != 1) or (in_channels != out_channels * self.expansion):
-            self.downsample = downsample1x1(
-                in_channels, out_channels * self.expansion, stride)  # size of 'conv3' and 'downsample' must match
+        if (self.stride != 1) or (in_channels != out_channels * self.expansion):                 # (stride = 2) or between changes of block sizes
+            self.downsample = downsample1x1(in_channels, out_channels * self.expansion, stride)  # size of 'conv3' and 'downsample' must match
         else:
             self.downsample = None
 
@@ -124,11 +125,13 @@ class ResNetBackbone(BackboneBase):
         super(ResNetBackbone, self).__init__(layer_config, in_channels)
         self.in_channels = in_channels
         self.layer_config = layer_config
+        self.first_conv = layer_config.get('first_conv', 7)
+        self.width = layer_config.get('width', 1)
         self.layers = self.make_layers(
             layer_cfg=self.layer_config,
             in_channels=self.in_channels,
-            widening_factor=self.layer_config.get('widening_factor', 1),
-            first_conv=self.layer_config.get('first_conv', 7)
+            width=self.width,
+            first_conv=self.first_conv,
         )
 
         initialize_weights(self.layers, activation='relu')
@@ -141,6 +144,7 @@ class ResNetBackbone(BackboneBase):
 
         out_channels = 64
         layers = nn.Sequential()
+
         if kwargs['first_conv'] == 3:
             block0 = nn.Sequential(
                 collections.OrderedDict(
@@ -162,6 +166,7 @@ class ResNetBackbone(BackboneBase):
                     ]
                 )
             )
+
         layers.add_module('block0', block0)
         in_channels = out_channels  # 64
 
@@ -191,19 +196,18 @@ class ResNetBackbone(BackboneBase):
 
     @property
     def output_size(self):
-        if self.input_size == (None, None):
-            return self.input_size
-        else:
-            h, w = self.input_size
-            h, w = h // 2, w // 2  # from 7x7 conv
-            for stride in self.layer_config['strides']:
-                if stride > 1:
-                    h, w = h // stride, w // stride
-            return h, w
+        return (None, None)
 
     @property
     def output_shape(self):
         return (self.out_channels, ) + tuple(self.output_size)
+
+    def compute_output_size(self, input_size: tuple):
+        h, w = input_size
+        if self.first_conv == 7:
+            return h // 32, w // 32
+        elif self.first_conv == 3:
+            return h // 8, w // 8
 
     @property
     def num_parameters(self):

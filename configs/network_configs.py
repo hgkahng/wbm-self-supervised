@@ -32,24 +32,13 @@ RESNET_BACKBONE_CONFIGS = RESNET_ENCODER_CONFIGS = {
         'block_type': 'basic',
         'channels': [64] * 2 + [128] * 2 + [256] * 2 + [512] * 2,
         'strides': [1, 1] + [2, 1] + [2, 1] + [2, 1],
-        'widening_factor': 2,
+        'width': 2,
     },
     '18.tiny': {
         'block_type': 'basic',
         'channels': [64] * 2 + [128] * 2 + [256] * 2 + [512] * 2,
         'strides': [1, 1] + [2, 1] + [2, 1] + [2, 1],
         'first_conv': 3,
-    },
-    '34.original': {
-        'block_type': 'basic',
-        'channels': [64] * 3 + [128] * 4 + [256] * 6 + [512] * 3,
-        'strides': [1, 1, 1] + [2, 1, 1, 1] + [2, 1, 1, 1, 1, 1] + [2, 1, 1]
-    },
-    '34.wide': {
-        'block_type': 'basic',
-        'channels': [64] * 3 + [128] * 4 + [256] * 6 + [512] * 3,
-        'strides': [1, 1, 1] + [2, 1, 1, 1] + [2, 1, 1, 1, 1, 1] + [2, 1, 1],
-        'widening_factor': 2,
     },
     '50.original': {
         'block_type': 'bottleneck',
@@ -60,7 +49,7 @@ RESNET_BACKBONE_CONFIGS = RESNET_ENCODER_CONFIGS = {
         'block_type': 'bottleneck',
         'channels': [64] * 3 + [128] * 4 + [256] * 6 + [512] * 3,
         'strides': [1, 1, 1] + [2, 1, 1, 1] + [2, 1, 1, 1, 1, 1] + [2, 1, 1],
-        'widening_factor': 2,
+        'width': 2,
     },
     '50.tiny': {
         'block_type': 'bottleneck',
