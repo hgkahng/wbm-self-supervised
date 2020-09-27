@@ -40,14 +40,14 @@ class SimCLR(Task):
 
         self.writer = SummaryWriter(log_dir=self.checkpoint_dir) if write_summary else None
 
-    def run(self, train_set, valid_set, epochs: int, batch_size: int, num_workers: int = 0, device: str = 'cuda', **kwargs):  # pylint: disable=unused-argument
-
-        assert isinstance(train_set, torch.utils.data.Dataset)
-        assert isinstance(valid_set, torch.utils.data.Dataset)
-        assert isinstance(epochs, int)
-        assert isinstance(batch_size, int)
-        assert isinstance(num_workers, int)
-        assert device.startswith('cuda') or device == 'cpu'
+    def run(self,
+            train_set: torch.utils.data.Dataset,
+            valid_set: torch.utils.data.Dataset,
+            epochs: int,
+            batch_size: int,
+            num_workers: int = 0,
+            device: str = 'cuda',
+            **kwargs):
 
         logger = kwargs.get('logger', None)
 
@@ -166,7 +166,7 @@ class SimCLR(Task):
                         with torch.no_grad():
                             logits = logits.detach()
                             targets = mask.detach().eq(1).nonzero(as_tuple=True)[1]
-                            out[metric_name] += metric_function(logits, targets)
+                            out[metric_name] += metric_function(logits, targets).item()
 
                 desc = f" Batch: [{i+1:>4}/{steps_per_epoch:>4}]: "
                 desc += " | ".join ([f"{k}: {v/(i+1):.4f}" for k, v in out.items()])
@@ -198,7 +198,7 @@ class SimCLR(Task):
                             out[metric_name] = 0.
                         logits = logits.detach()
                         targets = mask.detach().eq(1).nonzero(as_tuple=True)[1]
-                        out[metric_name] += metric_function(logits, targets)
+                        out[metric_name] += metric_function(logits, targets).item()
 
             return {k: v / steps_per_epoch for k, v in out.items()}
 
