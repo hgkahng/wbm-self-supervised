@@ -5,7 +5,6 @@ import numpy as np
 
 from torchvision.datasets.cifar import CIFAR10
 from sklearn.model_selection import train_test_split
-from PIL import Image
 
 
 class CustomCIFAR10(CIFAR10):
@@ -30,18 +29,16 @@ class CustomCIFAR10(CIFAR10):
                 random_state=2020 + kwargs.get('random_seed', 0)
             )
             self.data = self.data[indices]
-            self.targets = self.targets[indices]
+            self.targets = list(np.array(self.targets)[indices])
         else:
             pass
 
-    def __getitem__(self, index):
-        img, target = self.data[index], self.targets[index]
-        # img = Image.fromarray(img)
-
+    def __getitem__(self, idx):
+        img, target = self.data[idx], self.targets[idx]
         if self.transform is not None:
             img = self.transform(img)
 
-        return dict(x=img, y=target, idx=index)
+        return dict(x=img, y=target, idx=idx)
 
     @staticmethod
     def load_image_cv2(path: str):
@@ -62,12 +59,10 @@ class CIFAR10ForSimCLR(CIFAR10):
                                                target_transform=None,
                                                download=True)
 
-    def __getitem__(self, index):
-        img, target = self.data[index], self.targets[index]
-        # img = Image.fromarray(img)
-
+    def __getitem__(self, idx):
+        img, target = self.data[idx], self.targets[idx]
         if self.transform is not None:
             x1 = self.transform(img)
             x2 = self.transform(img)
 
-        return dict(x1=x1, x2=x2, y=target, idx=index)
+        return dict(x1=x1, x2=x2, y=target, idx=idx)
