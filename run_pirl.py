@@ -15,7 +15,7 @@ from configs.network_configs import RESNET_BACKBONE_CONFIGS
 from models.alexnet import AlexNetBackbone
 from models.vggnet import VggNetBackbone
 from models.resnet import ResNetBackbone
-from models.head import GAPProjector, NonlinearProjector
+from models.head import LinearHead, MLPHead
 from tasks.pirl import PIRL, MemoryBank
 from utils.loss import PIRLLoss
 from utils.metrics import TopKAccuracy
@@ -30,10 +30,9 @@ AVAILABLE_MODELS = {
 }
 
 PROJECTOR_TYPES = {
-    'linear': GAPProjector,
-    'mlp': NonlinearProjector,
+    'linear': LinearHead,
+    'mlp': MLPHead,
 }
-
 
 IN_CHANNELS = {'wm811k': 2}
 
