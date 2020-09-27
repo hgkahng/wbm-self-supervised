@@ -5,16 +5,17 @@ import tqdm
 
 import torch
 import torch.nn as nn
+from torch.utils.tensorboard import SummaryWriter
 
+from tasks.base import Task
 from models.base import BackboneBase, HeadBase
-from tasks.simclr import SimCLR
 from datasets.loaders import get_dataloader
-from utils.loss import SimCLRLoss, AttnCLRLoss
+from utils.loss import SimCLRLoss
 from utils.logging import get_tqdm_config
 from utils.logging import make_epoch_description
 
 
-class AttnCLR(SimCLR):
+class AttnCLR(Task):
     def __init__(self,
                  backbone: BackboneBase,
                  projector: HeadBase,
@@ -25,19 +26,28 @@ class AttnCLR(SimCLR):
                  checkpoint_dir: str,
                  write_summary: bool,
                  **kwargs):
-        super(AttnCLR, self).__init__(
-            backbone=backbone,
-            projector=projector,
-            optimizer=optimizer,
-            scheduler=scheduler,
-            loss_function=loss_function,
-            metrics=metrics,
-            checkpoint_dir=checkpoint_dir,
-            write_summary=write_summary
-        )
-        self.write_histogram = kwargs.get('write_histogram', False)
+        super(AttnCLR, self).__init__()
 
-    def run(self, train_set, valid_set, epochs: int, batch_size: int, num_workers: int = 0, device: str = 'cuda', **kwargs):
+        self.backbone = backbone
+        self.projector = projector
+
+        self.optimizer = optimizer
+        self.scheduler = scheduler
+        self.loss_function = loss_function
+        self.metrics = metrics if isinstance(metrics, dict) else None
+
+        self.checkpoint_dir = checkpoint_dir
+        os.makedirs(self.checkpoint_dir, exist_ok=True)
+        self.writer = SummaryWriter(log_dir=self.checkpoint_dir) if write_summary else None
+
+    def run(self,
+            train_set,
+            valid_set,
+            epochs: int,
+            batch_size: int,
+            num_workers: int = 0,
+            device: str = 'cuda',
+            **kwargs):
 
         assert isinstance(train_set, torch.utils.data.Dataset)
         assert isinstance(valid_set, torch.utils.data.Dataset)
@@ -48,8 +58,8 @@ class AttnCLR(SimCLR):
 
         logger = kwargs.get('logger', None)
 
-        self.backbone = self.backbone.to(device)
-        self.projector = self.projector.to(device)
+        self.backbone.to(device)
+        self.projector.to(device)
 
         train_loader = get_dataloader(train_set, batch_size, num_workers=num_workers)
         valid_loader = get_dataloader(valid_set, batch_size, num_workers=num_workers)
@@ -63,7 +73,7 @@ class AttnCLR(SimCLR):
 
                 # 0. Train & evaluate
                 train_history = self.train(train_loader, device=device)
-                valid_history = self.evaluate(valid_loader, device=device, current_epoch=epoch - 1)
+                valid_history = self.evaluate(valid_loader, device=device)
 
                 # 1. Epoch history (loss)
                 epoch_history = {
@@ -75,7 +85,12 @@ class AttnCLR(SimCLR):
 
                 # 2. Epoch history (other metrics if provided)
                 if self.metrics is not None:
-                    raise NotImplementedError
+                    assert isinstance(self.metrics, dict)
+                    for metric_name, _ in self.metrics.items():
+                        epoch_history[metric_name] = {
+                            'train': train_history.get(metric_name),
+                            'valid': valid_history.get(metric_name)
+                        }
 
                 # 3. TensorBoard
                 if self.writer is not None:
@@ -92,13 +107,16 @@ class AttnCLR(SimCLR):
                                 global_step=epoch
                             )
 
-                # 4. Save model if it is the current best
+                # 4-1. Save model if it is the current best
                 valid_loss = epoch_history['loss']['valid']
                 if valid_loss < best_valid_loss:
                     best_valid_loss = valid_loss
                     best_epoch = epoch
                     self.save_checkpoint(self.best_ckpt, epoch=epoch, **epoch_history)
-                    if kwargs.get('save_every', False):
+
+                # 4-2. Save intermediate models
+                if isinstance(kwargs.get('save_every'), int):
+                    if epoch % kwargs.get('save_every') == 0:
                         new_ckpt = os.path.join(self.checkpoint_dir, f'epoch_{epoch:04d}.loss_{valid_loss:.4f}.pt')
                         self.save_checkpoint(new_ckpt, epoch=epoch, **epoch_history)
 
@@ -129,78 +147,81 @@ class AttnCLR(SimCLR):
     def train(self, data_loader: torch.utils.data.DataLoader, device: str, **kwargs):  # pylint: disable=unused-argument
         """Train function defined for a single epoch."""
 
-        train_loss = 0.
+        out = {'loss': 0.}
         steps_per_epoch = len(data_loader)
         self._set_learning_phase(train=True)
 
         with tqdm.tqdm(**get_tqdm_config(steps_per_epoch, leave=False, color='red')) as pbar:
             for i, batch in enumerate(data_loader):
 
+                x1, x2 = batch['x1'].to(device), batch['x2'].to(device)
+                z1, z1_depth, z1_spatial = self.predict(x1)
+                z2, z2_depth, z2_spatial = self.predict(x2)
+                loss_z, logits, mask = self.loss_function(features=torch.stack([z1, z2], dim=1))
+                loss_depth, _, _ = self.loss_function(features=torch.stack([z1_depth, z2_depth], dim=1))
+                loss_spatial, _, _ = self.loss_function(features=torch.stack([z1_spatial, z2_spatial], dim=1))
+                loss = loss_z + loss_depth + loss_spatial
+                loss = 1/3 * loss
+
+                # Backpropagation & update
+                loss.backward()
+                self.optimizer.step()
                 self.optimizer.zero_grad()
 
-                x1, x2 = batch['x1'].to(device), batch['x2'].to(device)
-                z, attn = self.predict(torch.cat([x1, x2], dim=0))
-                z = z.view(x1.size(0), 2, -1)
+                # Accumulate loss & metrics
+                out['loss'] += loss.item()
+                if self.metrics is not None:
+                    assert isinstance(self.metrics, dict)
+                    for metric_name, metric_function in self.metrics.items():
+                        if metric_name not in out.keys():
+                            out[metric_name] = 0.
+                        with torch.no_grad():
+                            logits = logits.detach()
+                            targets = mask.detach().eq(1).nonzero(as_tuple=True)[1]
+                            out[metric_name] += metric_function(logits, targets)
 
-                # Calculate attention-based contrastive loss
-                loss, _ = self.loss_function(features=z, attention_scores=attn)
-                loss.backward()
-
-                # Clip the gradients (XXX: why is this necessary?)
-                # nn.utils.clip_grad_norm_(self.backbone.parameters(), 1.)
-                # nn.utils.clip_grad_norm_(self.projector.parameters(), 1.)
-
-                # Update weights
-                self.optimizer.step()
-
-                train_loss += loss.item()
-                desc = f" Batch [{i+1:>4}/{steps_per_epoch:>4}]"
-                desc += f" Loss: {train_loss/(i+1):.4f} "
+                desc = f" Batch: [{i+1:>4}/{steps_per_epoch:>4}]: "
+                desc += " | ".join ([f"{k}: {v/(i+1):.4f}" for k, v in out.items()])
                 pbar.set_description_str(desc)
                 pbar.update(1)
 
-            out = {
-                'loss': train_loss / steps_per_epoch,
-            }
-            if self.metrics is not None:
-                raise NotImplementedError
+            return {k: v / steps_per_epoch for k, v in out.items()}
 
-            return out
-
-    def evaluate(self, data_loader: torch.utils.data.DataLoader, device: str, current_epoch: int = None, **kwargs):  # pylint: disable=unused-argument
+    def evaluate(self, data_loader: torch.utils.data.DataLoader, device: str, **kwargs):  # pylint: disable=unused-argument
         """Evaluate current model. Running a single pass through the given dataset."""
 
-        valid_loss = 0.
+        out = {'loss': 0.}
         steps_per_epoch = len(data_loader)
         self._set_learning_phase(train=False)
 
         with torch.no_grad():
-            for i, batch in enumerate(data_loader):
+            for _, batch in enumerate(data_loader):
 
                 x1, x2 = batch['x1'].to(device), batch['x2'].to(device)
-                z, attn = self.predict(torch.cat([x1, x2], dim=0))
-                z = z.view(x1.size(0), 2, -1)
+                z1, z1_depth, z1_spatial = self.predict(x1)
+                z2, z2_depth, z2_spatial = self.predict(x2)
+                loss_z, logits, mask = self.loss_function(features=torch.stack([z1, z2], dim=1))
+                loss_depth, _, _ = self.loss_function(features=torch.stack([z1_depth, z2_depth], dim=1))
+                loss_spatial, _, _ = self.loss_function(features=torch.stack([z1_spatial, z2_spatial], dim=1))
+                loss = loss_z + loss_depth + loss_spatial
+                loss = 1/3 * loss
 
-                loss, masked_attn_scores = self.loss_function(features=z, attention_scores=attn)
-                valid_loss += loss.item()
+                # Accumulate loss & metrics
+                out['loss'] += loss.item()
+                if self.metrics is not None:
+                    assert isinstance(self.metrics, dict)
+                    for metric_name, metric_function in self.metrics.items():
+                        if metric_name not in out.keys():
+                            out[metric_name] = 0.
+                        logits = logits.detach()
+                        targets = mask.detach().eq(1).nonzero(as_tuple=True)[1]
+                        out[metric_name] += metric_function(logits, targets)
 
-                if self.write_histogram and (self.writer is not None):  # FIXME
-                    assert current_epoch is not None, ""
-                    self.writer.add_histogram(
-                        tag='valid/masked_attention',
-                        values=masked_attn_scores,
-                        global_step=(current_epoch * steps_per_epoch) + i,
-                    )
-
-            out = {'loss': valid_loss / steps_per_epoch}
-            if self.metrics is not None:
-                raise NotImplementedError
-
-            return out
+            return {k: v / steps_per_epoch for k, v in out.items()}
 
     def predict(self, x: torch.Tensor):
-        z, attention = self.projector(self.backbone(x))
-        return z, attention
+        z, z_depth, z_spatial = self.projector(self.backbone(x))
+        return z, z_depth, z_spatial
 
     def _set_learning_phase(self, train=False):
         if train:
