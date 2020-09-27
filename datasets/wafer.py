@@ -55,18 +55,12 @@ class WM811K(Dataset):
             self.samples = samples
 
     def __getitem__(self, idx):
-        return self.make_batch(idx)
-
-    def make_batch(self, idx):
 
         path, y = self.samples[idx]
         x = self.load_image_cv2(path)
 
-        # Apply transform
         if self.transform is not None:
             x = self.transform(x)
-
-        # Decouple mask
         x = self.decouple_mask(x)
 
         return dict(x=x, y=y, idx=idx)
@@ -83,11 +77,12 @@ class WM811K(Dataset):
 
         return torch.from_numpy(class_weights.astype(np.float32))
 
-    def _compute_effective_samples_class_weights(self, beta: float = 0.9999):
-        """Compute class weights, based on the following paper:
-            Cui, Y., Jia, M., Lin, T. Y., Song, Y., & Belongie, S. (2019).
-            Class-balanced loss based on effective number of samples.
-            In Proceedings of the IEEE Conference on Computer Vision and Pattern Recognition (pp. 9268-9277).
+    def _compute_effective_samples_class_weights(self, beta: float = 0.999):
+        """
+        Compute class weights, based on the following paper:
+        Cui, Y., Jia, M., Lin, T. Y., Song, Y., & Belongie, S. (2019).
+        Class-balanced loss based on effective number of samples.
+        In Proceedings of the IEEE Conference on Computer Vision and Pattern Recognition (pp. 9268-9277).
         """
 
         samples_per_class = np.zeros(self.num_classes)
@@ -129,13 +124,13 @@ class WM811KForDenoising(WM811K):
         super(WM811KForDenoising, self).__init__(root, transform)
         self.target_transform = target_transform
 
-    def make_batch(self, idx):
+    def __getitem__(self, idx):
+
         path, _ = self.samples[idx]
         img = self.load_image(path)
 
         x = self.transform(img)
         x = self.decouple_mask(x)
-
         y = self.target_transform(img).long().squeeze(0)  # 3d -> 2d
 
         return dict(x=x, y=y, idx=idx)
@@ -146,7 +141,8 @@ class WM811KForPIRL(WM811K):
         super(WM811KForPIRL, self).__init__(root, transform)
         self.positive_transform = positive_transform
 
-    def make_batch(self, idx):
+    def __getitem__(self, idx):
+
         path, y = self.samples[idx]
         img = self.load_image_cv2(path)
 
@@ -166,9 +162,10 @@ class WM811KForSimCLR(WM811K):
     def __init__(self, root, transform=None, proportion: float = 1.0):
         super(WM811KForSimCLR, self).__init__(root, transform, proportion)
 
-    def make_batch(self, idx):
+    def __getitem__(self, idx):
+
         path, y = self.samples[idx]
-        img = self.load_image(path)
+        img = self.load_image_cv2(path)
 
         if self.transform is not None:
             x1 = self.transform(img)
