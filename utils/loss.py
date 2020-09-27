@@ -368,7 +368,7 @@ class AttnCLRLoss(nn.Module):
         mask = mask.repeat(num_views, num_views)  # Tile mask; (B, B) -> (N x B, N x B)
         positive_mask = mask - torch.eye(mask.size(0), device=device)  # mask - diagonals
         negative_mask = 1. - mask                                      # reciprocal of the mask
-        
+
         # Refine attention scores. Before re-normalization, remove self-contrast & positive-pairs' scores.
         masked_scores = attention_scores * negative_mask
         masked_scores.div_(self.temperature)
