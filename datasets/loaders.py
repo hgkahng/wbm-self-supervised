@@ -13,6 +13,7 @@ def get_dataloader(dataset: torch.utils.data.Dataset,
                    balance: bool = False,
                    ):
     """Return a `DataLoader` instance."""
+    
     if balance:
         from datasets.samplers import ImbalancedDatasetSampler  # pylint: disable=import-outside-toplevel
         sampler = ImbalancedDatasetSampler(dataset)
