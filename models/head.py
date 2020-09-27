@@ -1,89 +1,46 @@
 # -*- coding: utf-8 -*-
 
 import math
-import functools
 import collections
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
-# from entmax import sparsemax
-
-from models.base import FlattenHeadBase, GAPHeadBase
+from models.base import GAPHeadBase
 from layers.core import Flatten
+from layers.attention import CBAM
 from utils.initialization import initialize_weights
 
 
-class LinearClassifier(FlattenHeadBase):
-    def __init__(self, input_shape: tuple, num_classes: int, dropout: float = 0.0):
-        super(LinearClassifier, self).__init__(input_shape, num_classes)
-
-        self.input_shape = input_shape  # (C, H, W)
-        self.num_classes = num_classes
-        self.dropout = dropout
-        self.layers = self.make_layers(
-            num_features=functools.reduce(lambda a, b: a * b, self.input_shape),
-            num_classes=self.num_classes,
-            dropout=self.dropout,
-        )
-
-        initialize_weights(self.layers, activation='relu')
-
-    @staticmethod
-    def make_layers(num_features: int, num_classes: int, dropout: float = 0.0):
-        layers = nn.Sequential(
-            collections.OrderedDict(
-                [
-                    ('flatten', Flatten()),
-                    ('dropout', nn.Dropout(p=dropout)),
-                    ('linear', nn.Linear(num_features, num_classes))
-                ]
-            )
-        )
-
-        return layers
-
-    def forward(self, x: torch.Tensor):
-        return self.layers(x)
-
-    @property
-    def in_channels(self):
-        return self.input_shape[0]
-
-    @property
-    def num_parameters(self):
-        return sum(p.numel() for p in self.layers.parameters() if p.requires_grad)
-
-
-class GAPClassifier(GAPHeadBase):
-    def __init__(self, in_channels: int, num_classes: int, dropout: float = 0.0):
+class LinearHead(GAPHeadBase):
+    def __init__(self, in_channels: int, num_features: int, dropout: float = 0.0):
         """
         Arguments:
-            input_shape: list or tuple of length 3, (C, H, W).
-            num_classes: int, number of target classes.
+            in_channels: int, number of input feature maps.
+            num_features: int, number of output features.
         """
-        super(GAPClassifier, self).__init__(in_channels, num_classes)
+        super(LinearHead, self).__init__(in_channels, num_features)
 
         self.in_channels = in_channels
-        self.num_classes = num_classes
+        self.num_features = num_features
         self.dropout = dropout
         self.layers = self.make_layers(
             in_channels=self.in_channels,
-            num_classes=self.num_classes,
+            num_features=self.num_features,
             dropout=self.dropout,
         )
-
         initialize_weights(self.layers)
 
     @staticmethod
-    def make_layers(in_channels: int, num_classes: int, dropout: float = 0.0):
+    def make_layers(in_channels: int, num_features: int, dropout: float = 0.0):
         layers = nn.Sequential(
             collections.OrderedDict(
                 [
                     ('gap', nn.AdaptiveAvgPool2d(1)),
                     ('flatten', Flatten()),
                     ('dropout', nn.Dropout(p=dropout)),
-                    ('linear', nn.Linear(in_channels, num_classes))
+                    ('linear', nn.Linear(in_channels, num_features))
                 ]
             )
         )
@@ -95,36 +52,31 @@ class GAPClassifier(GAPHeadBase):
 
     @property
     def num_parameters(self):
-        return sum(p.numel() for p in self.layers.parameters() if p.requires_grad)
+        return sum(p.numel() for p in self.parameters() if p.requires_grad)
 
 
-class LinearProjector(LinearClassifier):
-    def __init__(self, input_shape: tuple, num_features: int):
-        super(LinearProjector, self).__init__(input_shape, num_features, dropout=0.)
-
-
-class GAPProjector(GAPClassifier):
-    def __init__(self, in_channels: int, num_features: int):
+class LinearClassifier(LinearHead):
+    def __init__(self, in_channels: int, num_classes: int, dropout: float = 0.):
         """
         Arguments:
-            input_shape: list or tuple of shape (C, H, W).
-            num_features: int, number of output units.
+            in_channels: int, number of input feature maps.
+            num_classes: int, number of classes.
         """
-        super(GAPProjector, self).__init__(in_channels, num_features, dropout=0.)
+        super(LinearClassifier, self).__init__(in_channels, num_classes, dropout)
 
     @property
-    def num_features(self):
-        return self.num_classes
+    def num_classes(self):
+        return self.num_features
 
 
-class NonlinearProjector(GAPHeadBase):
+class MLPHead(GAPHeadBase):
     def __init__(self, in_channels: int, num_features: int):
         """
         Arguments:
-            input_shape: list or tuple of shape (C, H, W).
+            in_channels: int, number of input feature maps.
             num_features: int, number of output units.
         """
-        super(NonlinearProjector, self).__init__(in_channels, num_features)
+        super(MLPHead, self).__init__(in_channels, num_features)
 
         self.in_channels = in_channels
         self.num_features = num_features
@@ -156,6 +108,98 @@ class NonlinearProjector(GAPHeadBase):
     @property
     def num_parameters(self):
         return sum(p.numel() for p in self.layers.parameters() if p.requires_grad)
+
+
+class CBAMHead(GAPHeadBase):
+    def __init__(self, in_channels: int, num_features: int, input_size: tuple, **kwargs):
+        super(CBAMHead, self).__init__(in_channels, num_features)
+        self.in_channels = in_channels
+        self.num_features = num_features
+        self.input_size = input_size
+        self.cbam = CBAM(self.in_channels, spatial_conv_size=3)
+        self.z_linear = nn.Sequential(
+            collections.OrderedDict(
+                [
+                    ('gap', nn.AdaptiveAvgPool2d(1)),
+                    ('flatten', Flatten()),
+                    ('linear', nn.Linear(in_channels, num_features)),  # 512 -> 128
+                ]
+            )
+        )
+
+        self.depth_linear = nn.Sequential(
+            collections.OrderedDict(
+                [
+                    ('flatten', Flatten()),
+                    ('linear', nn.Linear(in_channels, num_features)),  # for resnet18, 512 -> 128
+                ]
+            )
+        )
+
+        self.spatial_linear = nn.Sequential(
+            collections.OrderedDict(
+                [
+                    ('flatten', nn.Conv2d(1, self.num_features, kernel_size=self.input_size, stride=1, padding=0)),
+                    ('flatten', Flatten()),
+                ]
+            )
+        )
+
+    def forward(self, x: torch.FloatTensor):
+        z, depth_attn, spatial_attn = self.cbam(x)
+        a = self.z_linear(F.relu(z + x))
+        b = self.depth_linear(depth_attn)
+        c = self.spatial_linear(spatial_attn)
+        return a, b, c
+
+    @property
+    def num_parameters(self):
+        return sum(p.numel() for p in self.parameters() if p.requires_grad)
+
+
+class SelfAttentionHead(GAPHeadBase):
+    def __init__(self, in_channels: int, num_features: int):
+        super(SelfAttentionHead, self).__init__(in_channels, num_features)
+        self.in_channels = in_channels
+        self.num_features = num_features
+        conv_kwargs = {
+            'kernel_size': 1,
+            'stride': 1,
+            'padding': 0
+        }
+        self.q_conv = nn.Conv2d(in_channels, in_channels//8, **conv_kwargs)
+        self.k_conv = nn.Conv2d(in_channels, in_channels//8, **conv_kwargs)
+        self.v_conv = nn.Conv2d(in_channels, in_channels//8, **conv_kwargs)
+        self.gamma = nn.Parameter(torch.zeros(1))
+        self.softmax = nn.Softmax(dim=-1)
+        self.linear()
+
+    def forward(self, x1: torch.FloatTensor, x2: torch.FloatTensor):
+
+        b, _, h, w = x1.size()
+        a1 = self.compute_attention_scores(x1)   # (B, P, P); P=h*w
+        a2 = self.compute_attention_scores(x2)   # (B, P, P)
+        v1 = self.v_conv(x1).view(b, -1, h * w)  # (B, C, P)
+        v2 = self.v_conv(x2).view(b, -1, h * w)  # (B, C, P)
+
+        z1 = torch.bmm(v1, a2.permute(0, 2, 1))  # (B, C, P)
+        z2 = torch.bmm(v2, a1.permute(0, 2, 1))  # (B, C, P)
+
+        z1 = z1.view(b, z1.size(1), h, w)        # (B, C, H, W)
+        z2 = z2.view(b, z2.size(1), h, w)        # (B, C, H, W)
+
+        z1 = self.gamma * z1 + x1
+        z2 = self.gamma * z2 + x2
+
+        return (z1, z2), (a1, a2)                # (B, C, H, W), (B, C, )
+
+    def compute_attention_scores(self, x: torch.FloatTensor):
+        b, _, h, w = x.size()
+        q = self.q_conv(x).view(b, -1, h * w).permute(0, 2, 1)  # (B, P, C)
+        k = self.k_conv(x).view(b, -1, h * w)                   # (B, C, P)
+        energy = torch.bmm(q, k)                                # (B, P, P)
+        attention = self.softmax(energy)                        # (B, P, P); normalized along the last dim.
+        return attention
 
 
 class AttentionProjector(GAPHeadBase):
