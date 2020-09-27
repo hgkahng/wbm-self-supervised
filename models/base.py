@@ -22,20 +22,8 @@ class BackboneBase(nn.Module):
         Freeze layers by their names. Searches through
         the hierarchy of layers to find an exact match.
         """
-
-        freezed_names = []
-        for name, module in self.named_modules():
-            if any([l in name for l in to_freeze]):
-                freezed_names.append(name)
-                for param in module.parameters():
-                    param.requires_grad = False
-
-        if 'all' in to_freeze:
-            for name, child in self.named_children():
-                for param in child.parameters():
-                    param.requires_grad = False
-
-        return freezed_names
+        for p in self.parameters():
+            p.requires_grad = False
 
     def save_weights(self, path: str):
         """Save weights to a file with weights only."""
